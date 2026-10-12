@@ -1,3 +1,143 @@
+## v2.1.4（versionCode 214）— 四个「开关无效」修复
+
+发布日期：2026-10-12。版本码：214。对比基线 v2.1.3（版本码 213）。
+
+四个问题全部在真机（小米 · Android 16 · 高德 17.00.0.2005）上用日志 + 截图逐条验证过。
+完整的技术叙述见 `docs/PROGRESS-免root内置版.md`。
+
+### 1. 「设置家」现在立即生效，且默认开启
+
+**根因不是开关没写进去，而是面板根本没重建。**
+高德的首页工具面板实例被 `BootUIPreloader.a.f9663a` 缓存复用，返回首页时拿到的还是旧 View；
+那条行本身由高德自己的 `g13.a`（HomeCompanyBuilderV3）构建，模块只负责放行。
+用户"把「内容」开关全打开后才显示"看到的是**重建时机** —— 那些开关让首页画布整体重建了一次。
+
+- `AmapNativeHome` 新增 `refresh()`：捕获 `b.a` 造出的容器与参数、面板实例，
+  以及 `g13.a` / `b.a` / `buildSkeletonView` 的 `Method` 句柄；开关一写就按 `signature()`
+  比对并在原地重建面板内容。失败只记一行日志，下次重建时照样生效。
+- `FloatingConfig.write()` 成功后直接回调 `AmapNativeHome.onConfigChanged(key)` ——
+  内置版里模块与宿主同进程，不需要 IPC。
+- 默认值由关改开（它是地图核心功能，不属于推荐内容）；迁移 `_amap_protocol_schema 210 → 211`，
+  只对"迁移前本来是开"的安装恢复，不覆盖用户的显式选择。
+
+日志：`amap_native_home refresh ok signature_changed=true`；关掉开关后那一行**立即消失**，未重启。
+
+### 2. 工具开关真的能把工具放进首页工具栏
+
+**根因在数据层。** 设备上 `local_tool_list_for_xml_v2` 里只有两个槽
+（`id0=103 公交地铁`、`id1=86 更多工具`），而旧的 `AmapData.toolbox()` **只会删、不会补** ——
+步行(104)/骑行(105) 从来没进过这个列表，开关打开也不可能有 UI。
+另外实测确认首页工具栏**只渲染 `id0..id4` 共 5 格**。
+
+- `AmapData.toolbox(source, settings, fill)`：保留应用自己的顺序，已开启的槽原样搬；
+  `fill=true` 时用本版本自带的 `AmapToolCatalog` 目录把空位补满（最多 5 格）。
+- **只在 boot 路径 fill**（`amap_tool_boot`）。`local_tool_list_for_xml_v2` 是高德自己的存储，
+  会被「更多工具」页读回，不往里写臆造的槽。
+- 新槽的点击载荷是 `Uri.encode({"schema": …})`，与 `com.autonavi…toolbox.v3.f.a` 的解析契约一致
+  （它 `Uri.decode` 后只取 `schema`；`ut` 可选，缺失有兜底）。
+- 被丢弃的槽写 `sizeN=0px`，渲染器据尺寸跳过，不再留空格子。
+
+日志：`amap_tool_boot slots=103,86,104,105,-`；工具栏显示 公交地铁 / 更多工具 / 步行 / 骑行。
+
+### 3. 「更多工具」有了独立开关
+
+它原本埋在「工具 → 其他」一百多个工具的最后。现在移到**「首页」分组**，
+标签「更多工具入口」，并从工具分区里排除，避免同一个键出现两个开关。
+工具分类顶部加了一行说明（工具栏 5 格、超出部分去「更多工具」页）。
+
+### 4. 地图兴趣点开关真的在改写样式
+
+真正的实现在原生层：`libmapclean_labels.so` 挂 `AAssetManager_open`，
+只截 `map_assets/style_*X_Main` 这张样式 protobuf，把兴趣点要素改写成不可见，道路 / 水域 / 地名保留。
+
+两个独立条件必须同时满足：库要能被**本模块的类加载器**装进来（JNI 认声明 native 方法的那个 loader），
+且框架必须调用 `native_init(entries)` 交出 inline-hook 原语。v2.1.3 两个都没满足：
+
+- LSPatch 把内嵌模块 APK 的 `lib/<abi>/x.so` 重写成 `<abi>/x.so`，旧代码只认前者 → 库从未加载；
+- `native_hook_dispatch.h` 的 `install()` 在框架从未绑定时**返回 true**，把"没装"伪装成"装上了"。
+
+- `NativeLabelAssets` 三种布局都认，并优先用宿主 `ApplicationInfo.nativeLibraryDir` 里的副本；
+- `MainHook.onPackageReady` 用 `param.getApplicationInfo().nativeLibraryDir` 再试一次；
+- `install()` 在 `hook_ == nullptr` 时改回返回 `false`；`configure` 日志补 `framework_bound=`。
+
+日志：`native_init framework_ready=true api=2` / `native_install host=amap asset_only=true failures=0` /
+`configure … accepted=1 framework_bound=1` /
+`style_filtered mask=1 rules=2950 bytes=173610 asset=map_assets/style_X_MainStd_Std_D_s_…`。
+
+### 构建侧：LSPatch 的产物不要再动
+
+排查过程中实测发现，LSPatch 写出的 central directory 里各条目声明的 `compress_size`
+合计 **366 MB**，而文件只有 **200 MB**（约 166 MB 相互重叠）。Android 不受影响
+（libziparchive 按本地头读数据），但按 CD 重建的工具会照搬这 366 MB ——
+`zipalign` 和 `apksigner` 都会把产物变成 **367 MB**。
+
+因此内置版固定为「LSPatch 直接产出并签名」，不做二次对齐/签名；
+也**不要**把 `.so` 追加进宿主 APK（追加会重写 CD → 原包签名失效 →
+LSPatch 报 `Could not read the original apk's signature`）。
+
+---
+
+## v2.1.3（versionCode 213）— 「设置家」行修复与推荐画布过滤加固
+
+发布日期：2026-10-12。版本码：213。对比基线 v2.1.2（版本码 212）。
+
+本次更新全部来自 hook 源码 + logcat + **对设备上实际安装的高德 17.00.0.2005 APK 的 DEX 级复核**，
+没有做界面层猜测。
+
+### 「设置家 / 设置单位 / 常去地点」整行不再出现（用户反馈“打开设置家无效”）
+
+根因不在模块开关，而在宿主自己的构建器：
+
+- `Lg13;` = `HomeCompanyBuilderV3`，全 APK 唯一调用点是 `ToolboxPanelV3.init`。
+- 该构建器要求 payload 的 `uid` 等于**当前登录 uid**，否则直接返回 `null`。
+- 实测缓存 `home_and_company_data` 里有完整的 3 条 `items`，但 `uid` 是空串 → 整行永远不创建。
+- 结果：开关开或关都一样，表现为“开关没反应”。
+
+修复：hook 内先反射取当前 uid，对齐后**交回高德原生构建器绘制**，样式（字号 / 圆角 / 描边 / 主题）
+全部跟随 App；仅未登录、原版仍拒绝时才使用同 payload 的兜底渲染。
+
+### 连带修复
+
+- 工具列表为空时不再把父容器设为 `GONE`。该父容器正是「设置家」那一行的宿主，
+  一旦 `GONE`，之后 `addView` 进去的 chips 永远不可见。
+- 兜底渲染的尺寸换算改为精确复刻宿主 `dx1.l(v) = round(v / 2 * density)`。
+  之前把 payload 的 `textSize` 当 sp 使用，字被撑大后拆行并被裁掉（标签消失）。
+- `AmapToolIcons.load()` 修复 `id.equals(...)` 空指针（`boot` / `id` 允许为 null），
+  并新增 `tokenOf()` 兼容 `iconToken` 键名。
+
+### 首页推荐画布过滤加固
+
+- 卡名解析改为按宿主真实规则取值：`cardName` / `card_name` / `bizName` / `biz_name` / `name`，
+  并做大小写与下划线归一化。旧实现只读 `component.extra_info.cardName`，
+  其他拼写的卡片永远匹配不上、也就永远不会被过滤。
+- 流式信封同时读 `is_done` / `isDone`，同时写 `has_more` / `hasMore`，
+  避免因宿主拼写差异导致编辑落空。
+
+### DEX 复核发现的失效分支（本次记录，未删除）
+
+以下字面量在整个 APK（含嵌套 ajx 包）中**均不存在**，对应分支为死代码：
+
+| 位置 | 失效字面量 |
+| --- | --- |
+| `AmapPlaceData.FEED_MODULES` | `poiDetailWaterFeedTitle`、`poiDetailWaterFeed` |
+| `AmapData.handles()` | `/ws/promote/main-page/assets`、`/ws/shield/dsp/profile/index/nodefaasv3` |
+| `AmapData.cardVisible()` | `tipsRanking`、`hourlyWeather`、`weatherForecast`、`contentCenterFeed`、`taxiQS`、`taxiQSMarket` |
+
+真实卡名由宿主 `gu2.A` 从响应树动态提取，因此这些固定字面量永远匹配不上。
+解析规则已按真实取值重写；**具体卡名清单仍需抓取一次真实响应报文才能定案**。
+
+### 验证
+
+| 层级 | 结果 |
+| --- | --- |
+| 编译 | BUILD OK，签名 SHA-256 未变 |
+| 安装 | Success（in-place 覆盖） |
+| Hook 加载 | 44/44 HOOKED，miss=0，无 hook_error |
+| Hook 命中 | `amap_native_home_chips` → `uid_aligned=true` → `built=DtLinearLayout` |
+| 行为回归 | 三枚胶囊带图标、单行、间距正确；天气 / 扫街榜 / 推荐 / 出行节均未复活 |
+
+---
+
 ## v2.1.2（versionCode 212）— 地图标识、底栏路由、工具与推荐修复
 
 发布日期：2026-10-10。版本码：212。对比基线为上一发布版本 2.1.0 系列（Git 标签 v2.1.0-beta1，版本码 210）。
