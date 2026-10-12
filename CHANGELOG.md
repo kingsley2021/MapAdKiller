@@ -64,16 +64,25 @@
 `configure … accepted=1 framework_bound=1` /
 `style_filtered mask=1 rules=2950 bytes=173610 asset=map_assets/style_X_MainStd_Std_D_s_…`。
 
-### 构建侧：LSPatch 的产物不要再动
+### 构建侧：内置版的签名与包结构
 
-排查过程中实测发现，LSPatch 写出的 central directory 里各条目声明的 `compress_size`
-合计 **366 MB**，而文件只有 **200 MB**（约 166 MB 相互重叠）。Android 不受影响
-（libziparchive 按本地头读数据），但按 CD 重建的工具会照搬这 366 MB ——
-`zipalign` 和 `apksigner` 都会把产物变成 **367 MB**。
+排查过程中一度把产物判为"包结构损坏"，**这个判断是错的**，在此更正：
 
-因此内置版固定为「LSPatch 直接产出并签名」，不做二次对齐/签名；
-也**不要**把 `.so` 追加进宿主 APK（追加会重写 CD → 原包签名失效 →
-LSPatch 报 `Could not read the original apk's signature`）。
+LSPatch 的集成产物是**有意嵌套**的 —— `assets/lspatch/origin.apk` 就是原封不动的官方 APK，
+而官方 APK 自身的条目（`lib/*.so`、`assets/*`、`resources.arsc` 等）也仍在包里，
+它们的字节**物理上就位于 origin.apk 覆盖的那段区域**。因此：
+
+- 统计各条目声明大小之和得到 366 MB，而文件只有 200 MB —— 不是数据缺失，是同一段区域被
+  两个记录引用；
+- `zipalign -c` 报一批 "header mismatch" 并认为 `origin.apk` 与其它条目区间重叠 —— 同一个原因；
+- 任何按声明大小重建的工具（`zipalign`、`apksigner`）都会把原区域复制两遍 → 产物变 367 MB。
+
+Android 的 libziparchive 和 Python 的 zipfile 都读**本地头**，所以完全正常：
+`adb install` 与 MIUI 安装器都实测可装、应用可正常运行。
+
+结论：内置版**只能保留 LSPatch 自己的 v2 签名**，不做二次对齐/签名（Android 7.0+ 认 v2）。
+也**不要**把 `.so` 追加进宿主 APK：追加会重写中央目录，破坏原包签名，
+LSPatch 会直接报 `Could not read the original apk's signature`。
 
 ---
 

@@ -24,6 +24,15 @@
 - 从官方版换过来 → 必须先卸载官方高德，**会清除登录态与离线地图**；
 - 已经是 2.1.3 免 root 内置版 → 可以直接覆盖安装，**不丢数据**。
 
+⚠️ **安装时安全中心 / 病毒扫描报红是误报**，不是病毒。触发点有三个，全部来自重打包机制本身，无法通过"清理安装包"消除：① 包里内嵌了一个完整的 APK（`assets/lspatch/origin.apk`，即原版高德）；② 运行时从 assets 加载 dex；③ 内置签名绕过。自己用的话选「继续安装」或加入信任名单即可。**介意红标请用 LSPosed 模块版** —— 它不改动任何地图安装包，不会被报毒。
+
+⚠️ 免 root 内置版体积较大（约 191 MiB），**下载后请先核对完整性**，不完整的包会报"解析软件包时出现问题"或"未签名"：
+
+| 文件 | 大小 | SHA-256 |
+| --- | --- | --- |
+| `AMap-2.1.4-rootless-integrated.apk` | 200,750,322 B | `7f50154cdc3139149af6fe65936a9a4349808a4f6a0eaf4c9b77ce95373566d3` |
+| `MapClean-lsp-v2.1.4.apk` | 4,277,717 B | `f1a62850667c16eac0cabbb82c54aeba899b5203de647fbf6cf19a4eeb72d6e6` |
+
 ## 这一版解决什么
 
 2.1.4 相对上一正式版 **2.1.2** 的变更，集中在四件“开关看起来没用”的事，以及新增免 root 交付形态。四项都在真机（高德 17.00.0.2005）上逐条验证过。
@@ -140,7 +149,9 @@ Vector 2.2 使用官方 API／service／interface 102 依赖，模块状态查�
 
     python .\tools\build_variant.py --OriginalApk <官方高德 APK> --OutputDirectory output\nonroot-amap
 
-脚本是 fail-closed 的：内嵌 `origin.apk` 必须与官方原包逐字节一致、模块哈希必须匹配、四个 ABI 的原生库必须齐备，任何一项不过就直接失败，不会产出半成品。**产物由 LSPatch 直接签名，不要再做 zipalign / apksigner 二次签名**（LSPatch 写出的 central directory 声明的数据量远大于文件本身，重建会把 200 MB 撑到 367 MB）。
+脚本是 fail-closed 的：内嵌 `origin.apk` 必须与官方原包逐字节一致、模块哈希必须匹配、四个 ABI 的原生库必须齐备，任何一项不过就直接失败，不会产出半成品。
+
+**产物只能保留 LSPatch 自己的 v2 签名，这不是包坏了，而是包内有意嵌套**：`assets/lspatch/origin.apk` 是原封不动的官方 APK，而官方 APK 自身的条目（`lib/*.so`、`assets/*`、`resources.arsc` 等）也仍在包里，字节**物理上就位于 origin.apk 覆盖的那段区域**。于是统计各条目声明大小之和会得到 366 MB（文件只有 200 MB），`zipalign -c` 会报一批 "header mismatch"，而任何按声明大小重建的工具都会把原区域复制两遍、把产物撑到 367 MB。Android 与 Python 的 zipfile 都读本地头，因此完全正常 —— `adb install` 与 MIUI 安装器均实测可装、应用可正常运行。
 
 连接开启 USB 调试的测试设备后，可运行 `.\tests\run-android.ps1 -BuildDirectory .\app`。其中地点详情数据过滤测试已在 Android 的真实 `org.json` 上通过 136 项断言，覆盖布局引用清理、基本信息保留、重复响应和未知结构回退。
 

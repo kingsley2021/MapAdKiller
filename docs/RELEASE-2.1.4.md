@@ -122,7 +122,44 @@ adb install -r "AMap-2.1.4-rootless-integrated.apk"
   迁移 `_amap_protocol_schema 210 → 211`，只对"迁移前本来是开"的安装恢复，不覆盖用户显式选择。
 - 原生层：集成模式下模块 APK 的原生库布局与类加载器查找路径对齐，
   宿主 `nativeLibraryDir` 优先；未绑定时不再谎报成功，`configure` 日志新增 `framework_bound=`。
-- 构建侧：确认 LSPatch 产物不可二次签名（详见文档），内置版固定为"LSPatch 直接产出并签名"。
+- 构建侧：定制版产物只可能带 LSPatch 自带的 v2 签名（原因见「构建与签名」一节），
+  内置版固定为"LSPatch 直接产出并签名"。
+
+---
+
+## 安装时安全中心报红？那是误报
+
+MIUI / 安全中心扫描这类**重打包**产物时会标红，这是集成方案的固有特征，不是病毒。
+触发点有三个，全部来自打包机制本身，**无法通过"清理安装包"消除**：
+
+1. 安装包里**内嵌了一个完整的 APK**（`assets/lspatch/origin.apk`，就是原版高德）——
+   杀软把"包中包"当作释放器特征；
+2. 运行时**从 assets 加载 dex**（`assets/lspatch/loader.dex`）——
+   动态加载代码是恶意软件的高频特征；
+3. 内置**签名绕过**（让高德读到原厂签名）—— 属于反篡改绕过行为。
+
+自己用的话，在安全中心选「继续安装」，或把高德加入信任名单即可。
+
+**介意红标的用户请改用 [`MapClean-lsp-v2.1.4.apk`](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.4)（LSPosed 模块版，约 4 MB）** ——
+它只是把模块装进框架，**不改动任何地图安装包**，不会被报毒。
+
+## 构建与签名
+
+免 root 内置版由 `tools/build_variant.py` 产出（精简源码 → 编译内嵌模块 → LSPatch 打补丁 → 校验发布）。
+脚本是 fail-closed 的，校验不通过不会产出半成品。
+
+**产物只能保留 LSPatch 自己的 v2 签名**，原因不是包有损坏，而是包内**有意嵌套**：
+`assets/lspatch/origin.apk` 是原封不动的官方 APK，而官方 APK 自身的条目
+（`lib/*.so`、`assets/*`、`resources.arsc` 等）也仍在包里，它们的字节**物理上就位于
+origin.apk 覆盖的那段区域**。于是：
+
+- 统计各条目声明大小之和会得到 366 MB，而文件只有 200 MB；
+- `zipalign -c` 会报一批 "header mismatch"，并认为 `origin.apk` 与其它条目区间重叠；
+- 任何按声明大小重建的工具（`zipalign`、`apksigner`）都会把原区域复制两遍 → 产物变成 367 MB。
+
+这些都是嵌套结构的正常结果，**Android 自身和 Python 的 zipfile 都读本地头、因此完全正常**
+（`adb install` 与 MIUI 安装器均实测可装、应用可正常运行）。代价就是 v1/v3 签名补不上；
+Android 7.0+ 认 v2，实际不受影响。
 
 ---
 
