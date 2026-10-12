@@ -42,6 +42,30 @@ mapadkiller.MainHook.onPackageReady → bmapclean.MainHook.onPackageReady  （�
   —— 允许那个空桩，但不允许任何真正能挂钩百度的类（`BaiduHooks`、`HomeClean`、
   `MineData`、`PoiLayer`、`Spec`、`Talos`…）。
 
+### 同一批的第二个回归：设置页「百度」那一页读写全挂
+
+用户反馈：模块设置页里百度那一页怎么点都提示 **「LSPosed 服务未连接」**。
+
+同一个成因的第二个漏接。`bmapclean.App` 的注释写着"v2.0.0 合并版起由
+`io.github.ldxm666.mapclean.App`（真正的 Application）驱动"，但那个驱动**从来没接上**：
+
+```java
+io.github.ldxm666.mapadkiller.App.attach(this);   // ← 有
+io.github.ldxm666.bmapclean.App.attach(this);     // ← 没有（本次补上）
+```
+
+于是 `bmapclean.App.service` 恒为 null：百度组（`bmapclean_config`）读开关永远返回缺省值、
+写开关永远返回 false，UI 就把它显示成"服务未连接"；同时 `bmapclean.App.app()`
+为 null，诊断卡永远显示"尚未收到回报"。**跟百度 hook 失效是同一类错误** ——
+合并时只把一半接上了。
+
+修复：`mapclean.App` 的 `onCreate` / `bindService` / `diedService` 三处补上
+`bmapclean.App.attach / onBind / onDied`；精简构建同样用 no-op 桩类补位；
+`app/build.ps1` 的护栏也把 `Lio/github/ldxm666/bmapclean/App;` 纳入必查。
+
+实机：`I/MapCleanApp: onServiceBind ok` 之后紧跟着
+`I/BMapCleanApp: onServiceBind ok (driven by mapclean.App)`（修复前这一行不存在）。
+
 ### 验证
 
 | 层级 | 结果 |

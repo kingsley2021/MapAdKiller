@@ -30,8 +30,8 @@
 
 | 文件 | 大小 | SHA-256 |
 | --- | --- | --- |
-| `AMap-2.1.5-rootless-integrated.apk` | 200,750,322 B | `f8da941860c4344e3c84fa99f8176c7223a69ce4c0a1040582360fd7f7e3e110` |
-| `MapClean-lsp-v2.1.5.apk` | 4,277,717 B | `252dd433cebe8dea7064bf5c72f6bbea19284432a10f0a7b85f98d7c1257c6be` |
+| `AMap-2.1.5-rootless-integrated.apk` | 200,750,322 B | `310c4959772a51dcef608251de7ce3681883b5ef4ac0ab5379172237b9b70a38` |
+| `MapClean-lsp-v2.1.5.apk` | 4,277,717 B | `3611ae031b51b877d57802056f114b32262a2c4093da8bdf3491063ec625f18d` |
 
 ## 这一版解决什么
 
