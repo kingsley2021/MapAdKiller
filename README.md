@@ -1,14 +1,14 @@
-# MapAdKiller 2.1.4
+# MapAdKiller 2.1.5
 
-高德、百度地图广告精简与界面定制模块，基于 **libxposed API 102**，版本码 **214**。
+高德、百度地图广告精简与界面定制模块，基于 **libxposed API 102**，版本码 **215**。
 
 **本版新增「免 root 内置版」**：把高德部分直接并入高德地图本体，不需要 root、不需要 LSPosed、不需要任何框架。腾讯地图保留原有实现，本轮没有重新验证。
 
-[![正式版](https://img.shields.io/badge/version-2.1.4-blue)](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.4) ![版本码](https://img.shields.io/badge/versionCode-214-blue) ![框架接口](https://img.shields.io/badge/libxposed-API_102-green) ![免 root](https://img.shields.io/badge/%E5%85%8D_root-%E5%86%85%E7%BD%AE%E7%89%88-green) [![许可证](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
+[![正式版](https://img.shields.io/badge/version-2.1.5-blue)](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.5) ![版本码](https://img.shields.io/badge/versionCode-215-blue) ![框架接口](https://img.shields.io/badge/libxposed-API_102-green) ![免 root](https://img.shields.io/badge/%E5%85%8D_root-%E5%86%85%E7%BD%AE%E7%89%88-green) [![许可证](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
 目录：[下载](#下载) · [功能与变化](#这一版解决什么) · [免 root 内置版](#免-root-内置版) · [安装与设置](#安装与设置) · [配置备份](#配置备份与迁移) · [适配范围](#适配范围) · [常见问题](#常见问题与反馈) · [构建](#构建)
 
-[下载正式版](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.4) · [LSP 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller) · [完整更新说明](docs/RELEASE-2.1.4.md) · [更新日志](CHANGELOG.md)
+[下载正式版](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.5) · [LSP 模块仓库](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller) · [完整更新说明](docs/RELEASE-2.1.5.md) · [更新日志](CHANGELOG.md)
 
 ## 下载
 
@@ -16,13 +16,13 @@
 
 | 形态 | 文件 | 适合谁 |
 | --- | --- | --- |
-| **免 root 内置版** | `AMap-2.1.4-rootless-integrated.apk`（约 191 MB） | **不想折腾框架**：直接安装就能用，不需要 root / LSPosed / 任何框架。只处理高德。 |
-| **LSPosed 模块** | `MapClean-lsp-v2.1.4.apk`（约 4.1 MB） | 已经有兼容框架（libxposed API 102），需要同时处理高德 / 百度 / 腾讯。 |
+| **免 root 内置版** | `AMap-2.1.5-rootless-integrated.apk`（约 191 MB） | **不想折腾框架**：直接安装就能用，不需要 root / LSPosed / 任何框架。只处理高德。 |
+| **LSPosed 模块** | `MapClean-lsp-v2.1.5.apk`（约 4.1 MB） | 已经有兼容框架（libxposed API 102），需要同时处理高德 / 百度 / 腾讯。 |
 
 ⚠️ 免 root 内置版用 LSPatch 重新签名，**签名与官方高德不同**，因此不能覆盖安装官方高德：
 
 - 从官方版换过来 → 必须先卸载官方高德，**会清除登录态与离线地图**；
-- 已经是 2.1.3 免 root 内置版 → 可以直接覆盖安装，**不丢数据**。
+- 已经是 2.1.3 / 2.1.4 免 root 内置版 → 可以直接覆盖安装，**不丢数据**。
 
 ⚠️ **安装时安全中心 / 病毒扫描报红是误报**，不是病毒。触发点有三个，全部来自重打包机制本身，无法通过"清理安装包"消除：① 包里内嵌了一个完整的 APK（`assets/lspatch/origin.apk`，即原版高德）；② 运行时从 assets 加载 dex；③ 内置签名绕过。自己用的话选「继续安装」或加入信任名单即可。**介意红标请用 LSPosed 模块版** —— 它不改动任何地图安装包，不会被报毒。
 
@@ -30,15 +30,16 @@
 
 | 文件 | 大小 | SHA-256 |
 | --- | --- | --- |
-| `AMap-2.1.4-rootless-integrated.apk` | 200,750,322 B | `7f50154cdc3139149af6fe65936a9a4349808a4f6a0eaf4c9b77ce95373566d3` |
-| `MapClean-lsp-v2.1.4.apk` | 4,277,717 B | `f1a62850667c16eac0cabbb82c54aeba899b5203de647fbf6cf19a4eeb72d6e6` |
+| `AMap-2.1.5-rootless-integrated.apk` | 200,750,322 B | `f8da941860c4344e3c84fa99f8176c7223a69ce4c0a1040582360fd7f7e3e110` |
+| `MapClean-lsp-v2.1.5.apk` | 4,277,717 B | `252dd433cebe8dea7064bf5c72f6bbea19284432a10f0a7b85f98d7c1257c6be` |
 
 ## 这一版解决什么
 
-2.1.4 相对上一正式版 **2.1.2** 的变更，集中在四件“开关看起来没用”的事，以及新增免 root 交付形态。四项都在真机（高德 17.00.0.2005）上逐条验证过。
+2.1.5 相对上一正式版 **2.1.2** 的变更，集中在四件“开关看起来没用”的事，以及新增免 root 交付形态。四项都在真机（高德 17.00.0.2005）上逐条验证过。
 
 | 区域 | 功能与修复 |
 | --- | --- |
+| 百度地图 | **修复 2.1.4 的回归**：百度那一半根本没被转发到，一个钩子都没装（日志里连 `BMapClean` 都没有）。现在恢复转发，实测 60 个钩子全部装上。 |
 | 免 root 交付 | 新增免 root 内置版：LSPatch 集成打包，内嵌原包与官方逐字节一致；入口是应用内悬浮球，不申请任何权限。 |
 | 高德「设置家」 | 修复开关无效：那条行由高德自己绘制、模块只负责放行，而首页面板实例被高德缓存复用，改开关不会重建。现在**写完立刻生效**，并且默认开启。 |
 | 高德工具栏 | 修复步行 / 骑行打开后不出现：高德自己的工具槽只有两项，模块以前只会删不会加。现在按“已开启”自动补齐空位（首页工具栏实测只有 5 格），且只改首页那一份数据。 |
@@ -76,13 +77,13 @@
 adb uninstall com.autonavi.minimap
 adb install "AMap-2.1.4-rootless-integrated.apk"
 
-# 从 2.1.3 免 root 内置版升级
+# 从 2.1.3 / 2.1.4 免 root 内置版升级
 adb install -r "AMap-2.1.4-rootless-integrated.apk"
 ```
 
 ## 安装与设置
 
-1. 安装 Release 中的 `MapClean-lsp-v2.1.4.apk`，已有用户可覆盖安装。
+1. 安装 Release 中的 `MapClean-lsp-v2.1.5.apk`，已有用户可覆盖安装。
 2. 在支持 libxposed API 102 的框架中启用模块，勾选需要处理的地图应用。
 3. 进入模块设置，按地图和分组调整选项。
 4. 修改后强制停止对应地图，再重新打开；地图标识样式在渲染器初始化时生效。

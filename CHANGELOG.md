@@ -1,3 +1,58 @@
+## v2.1.5（versionCode 215）— 修复百度地图完全失效
+
+发布日期：2026-10-12。版本码：215。对比基线 v2.1.4（版本码 214）。
+
+### 症状
+
+2.1.4 模块对百度地图**完全没有反应**：开关照写、界面照旧，logcat 里连一条
+`BMapClean` 都没有。腾讯与高德不受影响。
+
+### 根因：一次"为了另一个构建"的删改，泄漏到了共享源码
+
+一个 APK 只能声明一个 Xposed 入口（`META-INF/xposed/java_init.list`），
+所以百度、腾讯两半都要靠共享源码里的**显式转发**到达：
+
+```
+mapclean.MainHook.onModuleLoaded   → bmapclean.MainHook.onModuleLoaded   （设置 H.module）
+mapadkiller.MainHook.onPackageReady → bmapclean.MainHook.onPackageReady  （装百度钩子）
+```
+
+为了让「只并入高德」的免 root 精简构建能编译（那个构建把整个 `bmapclean` 包删掉），
+**这两处转发被直接从共享源码里删掉了**。精简构建确实过了，但完整模块的百度也一起没了：
+
+- 没有 `onModuleLoaded` 转发 → `bmapclean.H.module` 恒为 null →
+  每一次 `hook()` 都以 `miss <id> (module null)` 失败，装了等于没装；
+- 没有 `onPackageReady` 转发 → 百度分支只剩一句注释，一个钩子都不装。
+
+### 修复
+
+| 位置 | 改动 |
+| --- | --- |
+| `mapclean/MainHook.java` | 恢复向 `bmapclean.MainHook.onModuleLoaded` 的转发（`H.module` 必须先赋值） |
+| `mapadkiller/MainHook.java` | `case PKG_BMAP` 恢复调用 `bmapclean.MainHook.onPackageReady` |
+| `tools/build_variant.py` | 新增 `bmapclean/MainHook` 的 no-op 桩类 —— 精简构建靠**桩**编译，而不是靠删调用 |
+
+### 顺手加的构建期护栏（这次就是缺这个）
+
+- `app/build.ps1`：d8 之后直接在 `classes.dex` 里查类型描述符，
+  `Lio/github/ldxm666/bmapclean/MainHook;` 或 `Lio/github/ldxm666/mapadkiller/TmapHooks;`
+  缺任一个就 **fail the build** —— 谁再删转发都过不了构建。
+- `tools/build_variant.py`：把 `bmapclean/MainHook` 加进精简构建的 **required** 列表
+  （即"转发必须还在"），并把原来"整包禁用 `Lio/github/ldxm666/bmapclean/`"改成**逐类禁用**
+  —— 允许那个空桩，但不允许任何真正能挂钩百度的类（`BaiduHooks`、`HomeClean`、
+  `MineData`、`PoiLayer`、`Spec`、`Talos`…）。
+
+### 验证
+
+| 层级 | 结果 |
+| --- | --- |
+| 模块编译 | BUILD OK，签名 `cbecdaeb…54ed`（不变，可就地覆盖） |
+| 百度实机 | `baidu_adapter version=22.0.0 mode=capabilities` → **`event=install_done pkg=com.baidu.BaiduMap ok=60 miss=0`** |
+| 精简构建 | BUILD OK（桩类生效，护栏通过） |
+| 高德回归 | 四件修复全部照旧：`amap_tool_boot slots=103,86,104,105,-`、`amap_home_chips built=… items=3`、`style_filtered rules=2950` |
+
+---
+
 ## v2.1.4（versionCode 214）— 四个「开关无效」修复
 
 发布日期：2026-10-12。版本码：214。对比基线 v2.1.3（版本码 213）。
