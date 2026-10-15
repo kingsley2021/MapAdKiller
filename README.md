@@ -1,8 +1,8 @@
-# MapAdKiller 2.2.0
+# MapAdKiller 2.2.1
 
 高德、百度、腾讯地图的界面精简模块，基于 libxposed API 102。移除广告与推荐内容，保留道路和地名。
 
-版本码 220。许可证 GPL-3.0-or-later。
+版本码 221。许可证 GPL-3.0-or-later。
 
 ## 支持的应用与版本
 
@@ -22,10 +22,12 @@
 
 | 形态 | 文件 | 说明 |
 | --- | --- | --- |
-| 免 root 内置版 | `高德地图-2.2.0-免root内置版.apk` | 模块并入地图本体，不需要 root、LSPosed 或任何框架。只处理对应的那一个地图。 |
-| 免 root 内置版 | `百度地图-2.2.0-免root内置版.apk` | 同上 |
-| 免 root 内置版 | `腾讯地图-2.2.0-免root内置版.apk` | 同上 |
-| LSPosed 模块 | `MapClean-lsp-v2.2.0.apk` | 需要支持 libxposed API 102 的框架，同时处理三个地图。 |
+| 免 root 内置版 | `amap-2.2.1-nonroot.apk` | 高德地图。模块并入地图本体，不需要 root、LSPosed 或任何框架。只处理对应的那一个地图。 |
+| 免 root 内置版 | `baidu-2.2.1-nonroot.apk` | 百度地图。同上 |
+| 免 root 内置版 | `tencent-2.2.1-nonroot.apk` | 腾讯地图。同上 |
+| LSPosed 模块 | `MapClean-lsp-v2.2.1.apk` | 需要支持 libxposed API 102 的框架，同时处理三个地图。 |
+
+发布页的资产名一律 ASCII：GitHub 会剥离文件名中的非 ASCII 字符，中文名清洗后会撞成同名并静默丢文件。上面的文件名与 Release 页一致。
 
 ## 功能
 
@@ -39,18 +41,29 @@
 
 免 root 内置版的设置入口是应用内悬浮球，不申请任何权限，退出地图即消失。设置面板为底部抽屉，写入失败会回滚并提示，不会留下「看起来开了其实没写进去」的状态。
 
+## 自带默认配置
+
+模块内置一份 JSON（`res/raw/default_config.json`），全新安装后自动应用一次，装完就是作者推荐的一套开关。
+
+- 格式与「更多 → 导出 JSON 配置」完全一致，可直接替换。
+- `null` 键表示「未设置、保持缺省」，应用时跳过，不会写成 `false`。
+- 只应用一次：标记键 `_defaults_applied` 存在即跳过，不覆盖用户改动。
+- 设置页「恢复默认配置」可手动再应用一次，忽略标记，有二次确认。
+- 免 root 内置版按宿主包名只应用本机那一家的配置组，其它组静默跳过。
+- 内置 JSON 覆盖高德（139 键）、百度（51 键）与模块界面项（1 键）；腾讯组尚未纳入。
+
 ## 安装
 
 **免 root 内置版**：包已重新签名，与官方地图签名不一致，必须先卸载官方版本。卸载会清除登录态与离线地图，请先确认可以接受。
 
 ```powershell
 adb uninstall com.autonavi.minimap
-adb install "高德地图-2.2.0-免root内置版.apk"
+adb install "amap-2.2.1-nonroot.apk"
 ```
 
 从旧版免 root 内置版升级用 `adb install -r`。
 
-**LSPosed 模块**：安装 `MapClean-lsp-v2.2.0.apk`，在框架中启用模块，勾选需要处理的地图应用。
+**LSPosed 模块**：安装 `MapClean-lsp-v2.2.1.apk`，在框架中启用模块，勾选需要处理的地图应用。
 
 安全中心或病毒扫描报红是重打包机制导致的误报，触发点是包内嵌原版 APK、运行时从 assets 加载 dex、内置签名绕过，无法通过清理安装包消除。介意红标请用 LSPosed 模块版，它不改动地图安装包。
 
@@ -73,7 +86,7 @@ python .\app\native\build.py
 .\app\build.ps1
 ```
 
-输出 `output/MapClean-lsp-v2.2.0.apk`。原生库覆盖四个 ABI，并检查 ZIP 存储方式与 16 KB 对齐。框架 API 仅参与编译，不打入模块 APK。
+输出 `output/MapClean-lsp-v2.2.1.apk`。产物名从 `Version.NAME` 动态生成，改版本号不会再出现「内容是新的、文件名是旧的」。原生库覆盖四个 ABI，并检查 ZIP 存储方式与 16 KB 对齐。框架 API 仅参与编译，不打入模块 APK。
 
 免 root 内置版由单独脚本产出（精简源码 → 编译内嵌模块 → LSPatch 打补丁 → 校验发布）：
 
@@ -90,6 +103,8 @@ python .\tools\build_variant.py --Target amap --KeepWork --OriginalApk <官方�
 - 百度面板仍保留约 80px 空白带。这是原生 `mHideHeight` 的几何下限，不再下压以避免拖动区间反转。
 - 腾讯工具宫格第 3 档（完全展开）未取得运行时截图验证，自动化上滑只到中档。
 - 腾讯 `extendHeight` 在官方包内无调用点。模块写入该字段生效，但与官方后续版本的兼容性未知。
+- 免 root 内置版的「自带默认配置」仅做静态验证。变体包名与官方一致，安装会覆盖已装的内置版，故未做真机验证。
+- 内置默认配置不含腾讯组，腾讯侧不自动应用任何开关。
 - 免 root 内置版产物只保留 LSPatch 的 v2 签名。包内嵌套了原封不动的官方 APK，条目声明大小之和大于文件本身，`zipalign -c` 会报一批 header mismatch。Android 与 Python 的 zipfile 都读本地头，安装与运行正常。
 
 ## 许可
