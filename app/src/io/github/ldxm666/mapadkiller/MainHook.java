@@ -38,6 +38,10 @@ public final class MainHook {
         final String process = sProcess;
         if (pkg == null) return;
 
+        // 一次性宿主身份诊断：签名 DN + 嵌入/模块模式。
+        // 用于快速识别"用户装错了包"（官方 CN=minimap / 内置版 CN=xiawanli）。
+        HostInfo.reportOnce(pkg);
+
         // 模块自身：状态自检（LSPosed Manager 显示"已激活"）
         if (PKG_SELF.equals(pkg)) {
             try {

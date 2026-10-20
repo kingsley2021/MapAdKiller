@@ -129,6 +129,15 @@ public final class App extends Application implements XposedServiceHelper.OnServ
         // 腾讯那一半同理：tmapclean.App.app() 为 null 时，它的诊断读取与 token 生成全失效。
         io.github.ldxm666.tmapclean.App.attach(this);
         registerListener(this);
+        // 宿主 Application 此时一定已就绪 —— 补一次签名/模式诊断。
+        // 早期（hook 安装时）那次调用拿不到 Context 会直接返回且不置位，这里才是真正能拿到 DN 的时机。
+        // 反射调用：mapadkiller 在百度/腾讯变体里会被 DROP，不能有编译期依赖。
+        try {
+            Class.forName("io.github.ldxm666.mapadkiller.HostInfo")
+                    .getMethod("reportOnce", String.class)
+                    .invoke(null, getPackageName());
+        } catch (Throwable ignored) {
+        }
     }
 
     @Override

@@ -91,7 +91,11 @@ final class AmapPanel {
                 // so the sheet itself can turn the orb off; the icon is the way back, because
                 // in the 免 root build the sheet is unreachable once the orb is gone.
                 new FloatingPanel.Item(FloatingConfig.K_FLOAT_ENABLED, "悬浮窗入口（悬浮球）",
-                        "关掉后悬浮球和这个面板都不再出现。需要重新打开时：长按底部「我的」标签约 1 秒，面板会再次弹出，把这一项拨回开即可。"),
+                        // 默认值按安装形态分流（见 FloatingConfig.floatDefault）：内置版默认开，
+                        // 模块版默认关 —— 悬浮窗是免 root 用户专属，root 用户该用模块 App 的设置页。
+                        FloatingConfig.floatDefault()
+                                ? "关掉后悬浮球和这个面板都不再出现。需要重新打开时：长按底部「我的」标签约 1 秒，面板会再次弹出，把这一项拨回开即可。"
+                                : "模块版默认不显示悬浮球（悬浮窗主要面向免 root 内置版）。需要的话打开这一项即可；也可以直接用模块 App 的设置页。"),
                 new FloatingPanel.Item(Config.K_DEBUG_LOG, "调试日志",
                         "把协议适配错误输出到 logcat，排障用。"),
             // `true` = 这一页底部渲染「当前版本 / 检查更新」两行。免 root 内置版没有
@@ -464,6 +468,22 @@ final class AmapPanel {
 
     static boolean read(String key) {
         return Config.visible(key);
+    }
+
+    /**
+     * True when the key has an <b>explicit</b> stored value.
+     *
+     * <p>Needed because {@code Config.visible()} cannot tell "unset" from "set to the default":
+     * the mode-aware default for {@code float_enabled} only applies to keys the user never
+     * wrote. Returns false when there is no backend at all (nothing is stored by definition).
+     */
+    static boolean hasStored(String key) {
+        try {
+            android.content.SharedPreferences p = Config.prefs();
+            return p != null && p.contains(key);
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /**

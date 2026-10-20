@@ -170,9 +170,72 @@ public final class FloatingConfig {
      * {@code true} fallback below covers the "preferences not reachable yet" case, which must
      * also mean "keep the orb" rather than "silently lose the only entry point".
      */
+    /**
+     * 悬浮窗是否属于「免 root 内置版」。
+     *
+     * <p>产品要求：**悬浮窗是免 root 用户专属**。模块版（LSPosed / root 用户）应该用模块 App
+     * 的设置页，默认不往高德里挂球 —— 但功能不删，用户在面板里显式打开即可。
+     *
+     * <p>判据只看 {@code App.isEmbedded()}（宿主 APK 内是否有 {@code assets/lspatch/config.json}），
+     * **不看**"有没有 root" —— 那既判断不了也不可靠。该方法由 {@code amap-core2} 提供，
+     * 这里用反射调用：两种构建都能编译，拿不到就按模块版处理。
+     */
+    public static boolean isEmbedded() {
+        int known = embeddedState;
+        if (known >= 0) return known == 1;
+        boolean value = false;
+        // 真实实现是 mapadkiller.HostInfo.isEmbedded()（判据：宿主 APK 内是否有
+        // assets/lspatch/config.json）。这里用反射是为了不在 mapclean 侧引入编译期依赖，
+        // 同时兼容 mapclean.App 将来可能提供的同名入口 —— 两个都试，任一返回 true 即算内置版。
+        value = reflectBool("io.github.ldxm666.mapadkiller.HostInfo");
+        if (!value) value = reflectBool("io.github.ldxm666.mapclean.App");
+        // 两个都拿不到 ⇒ 按模块版（默认不挂球），绝不因此崩。
+        embeddedState = value ? 1 : 0;
+        return value;
+    }
+
+    /** 反射调用 {@code isEmbedded()}；类或方法不存在一律返回 false，不抛。 */
+    private static boolean reflectBool(String className) {
+        try {
+            Object r = Class.forName(className).getMethod("isEmbedded").invoke(null);
+            return r instanceof Boolean && ((Boolean) r).booleanValue();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+    /** -1 = 未判定, 0 = 模块版, 1 = 内置版。判定只做一次。 */
+    private static volatile int embeddedState = -1;
+
+    /** 悬浮球的**默认**开关：内置版 = 开；模块版 = 关。显式写过的值永远优先。 */
+    public static boolean floatDefault() {
+        return isEmbedded();
+    }
+
+    /**
+     * 悬浮窗总开关。默认值按 {@link #floatDefault()} 分流，判定只在这一层做。
+     *
+     * <p>读配置优先：老用户若已显式写过 {@code float_enabled=true}，模块版也照样挂球。
+     */
     public static boolean floatEnabled() {
         try {
-            return read(K_FLOAT_ENABLED, true);
+            if (!hasStored(K_FLOAT_ENABLED)) return floatDefault();
+            return read(K_FLOAT_ENABLED, floatDefault());
+        } catch (Throwable t) {
+            return floatDefault();
+        }
+    }
+
+    /**
+     * True when the key has an <b>explicit</b> stored value.
+     *
+     * <p>{@code Config.visible()} hides that distinction behind {@code defaultVisible}, and the
+     * mode-aware default for {@code float_enabled} only applies to "never written". 百度/腾讯
+     * 变体返回 true（按已设置处理），不改变它们原有行为 —— 只有高德变体会被构建。
+     */
+    private static boolean hasStored(String key) {
+        if (Vendor.tmap() || Vendor.baidu()) return true;
+        try {
+            return AmapPanel.hasStored(key);
         } catch (Throwable t) {
             return true;
         }
@@ -262,7 +325,12 @@ public final class FloatingConfig {
         }
     }
 
+    /**
+     * Read one switch. {@code float_enabled} is special: 悬浮窗是免 root 内置版专属，
+     * 所以"从未写过"时用 {@link #floatDefault()} 而不是可见性表的 true。
+     */
     public static boolean read(String key) {
+        if (K_FLOAT_ENABLED.equals(key) && !hasStored(key)) return floatDefault();
         if (Vendor.tmap()) return TmapPanel.read(key);
         return Vendor.baidu() ? BaiduPanel.read(key) : AmapPanel.read(key);
     }

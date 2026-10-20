@@ -433,6 +433,9 @@ public final class Config {
      * <p>注：libxposed API 102 的 {@code XposedModule} **没有** context getter
      * （`javap` 核实：该类只有构造器），所以没有"从 module 拿 Context"这条路。
      */
+    /** 包内可复用的宿主 Context（供 {@link HostInfo} 做签名/模式诊断）；拿不到返回 null。 */
+    static android.content.Context hostCtx() { return hostContext(); }
+
     private static android.content.Context hostContext() {
         // 1) ActivityThread.currentApplication()
         try {
