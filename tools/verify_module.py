@@ -66,8 +66,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--ModuleApk", type=Path, required=True)
     parser.add_argument("--SourceDirectory", type=Path, default=ROOT)
-    parser.add_argument("--ExpectedVersion", default="2.1.2")
-    parser.add_argument("--ExpectedVersionCode", type=int, default=212)
+    parser.add_argument("--ExpectedVersion", default="2.1.3")
+    parser.add_argument("--ExpectedVersionCode", type=int, default=213)
     parser.add_argument("--NativeAbis", nargs="+", default=["arm64-v8a", "armeabi-v7a", "x86", "x86_64"])
     parser.add_argument("--Java", type=Path, default=Path(shutil.which("java") or "java"))
     parser.add_argument("--AndroidSdk", type=Path,

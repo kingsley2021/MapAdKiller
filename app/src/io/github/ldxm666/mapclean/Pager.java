@@ -1,29 +1,42 @@
 package io.github.ldxm666.mapclean;
 
 import android.content.Context;
+import android.graphics.Canvas;
 import android.view.MotionEvent;
 import android.view.VelocityTracker;
+import android.view.View;
 import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.widget.Scroller;
 
 /**
- * 极简横向分页容器 —— **不依赖 AndroidX**。
+ * Horizontal paging container -- **no AndroidX**.
  *
- * 本工程是 `javac + android.jar` 的离线构建（没有 Gradle、没有依赖仓库），
- * 所以不能用 ViewPager/ViewPager2；这里用最朴素的做法自己实现：
- *   - 子 View 一字排开（第 i 页放在 x = i*宽），翻页靠父容器的 scrollX；
- *   - 手指横向拖拽**跟手**（scrollTo），松手按速度/半页阈值吸附到整页；
- *   - 只在"横向意图明显"时拦截触摸（|dx| > slop 且 > |dy|*1.3），
- *     否则把手势让给页内的 ScrollView，纵向滚动不受影响。
+ * This project builds with {@code javac + android.jar} (no Gradle, no dependency
+ * repository), so ViewPager / ViewPager2 are unavailable. Children sit side by side at
+ * {@code x = i * width} and paging is driven by the parent's {@code scrollX}:
  *
- * 用法：pager.addView(page1); pager.addView(page2); pager.setPage(1, true);
+ * <ul>
+ *   <li>drag tracks the finger exactly, with rubber-band resistance past the first and
+ *       last page so the edge reads as elastic rather than dead;</li>
+ *   <li>release settles to a whole page by a blend of throw velocity and distance, with a
+ *       spring interpolator so it lands with a touch of overshoot;</li>
+ *   <li>neighbouring pages fade and scale slightly by distance, giving the switch a
+ *       sense of depth instead of a flat slide;</li>
+ *   <li>horizontal intent is claimed only when {@code |dx| > slop && |dx| > |dy| * 1.3},
+ *       so vertical scrolling inside a page is never stolen.</li>
+ * </ul>
  */
 public final class Pager extends ViewGroup {
 
     public interface OnPageChanged {
         void onPageChanged(int index);
     }
+
+    /** How far past an edge the content may travel, as a fraction of the page width. */
+    private static final float EDGE_RESISTANCE = 0.32f;
+    /** Settle duration base; longer throws travel for longer. */
+    private static final long SETTLE_BASE_MS = 240L;
 
     private final Scroller scroller;
     private final int touchSlop;
@@ -35,6 +48,7 @@ public final class Pager extends ViewGroup {
 
     private float downX, downY, lastX;
     private boolean dragging;
+    private boolean settled = true;
     private VelocityTracker vt;
 
     public Pager(Context c) {
@@ -45,6 +59,7 @@ public final class Pager extends ViewGroup {
         minFling = vc.getScaledMinimumFlingVelocity();
         maxFling = vc.getScaledMaximumFlingVelocity();
         setClipToPadding(false);
+        setChildrenDrawingOrderEnabled(true);
     }
 
     public void setOnPageChanged(OnPageChanged l) { listener = l; }
@@ -53,50 +68,100 @@ public final class Pager extends ViewGroup {
 
     public int pageCount() { return getChildCount(); }
 
-    /** 切到第 p 页；animate=false 用于初始化/布局完成后的归位 */
+    /** Switch to page {@code p}; {@code animate=false} snaps (init / relayout). */
     public void setPage(int p, boolean animate) {
         int n = getChildCount();
         if (n == 0) return;
         if (p < 0) p = 0;
         if (p > n - 1) p = n - 1;
-        int target = p * getWidth();
+        int w = getWidth();
+        int target = p * w;
         boolean changed = page != p;
         page = p;
-        if (animate && getWidth() > 0) {
-            scroller.startScroll(getScrollX(), 0, target - getScrollX(), 0, 260);
+        if (animate && w > 0) {
+            int distance = Math.abs(target - getScrollX());
+            long duration = Math.min(520L, SETTLE_BASE_MS + distance / 3L);
+            settled = false;
+            scroller.startScroll(getScrollX(), 0, target - getScrollX(), 0, (int) duration);
             invalidate();
         } else {
             scroller.abortAnimation();
+            settled = true;
             scrollTo(target, 0);
+            applyTransforms();
         }
         if (changed && listener != null) listener.onPageChanged(p);
     }
 
-    @Override
-    protected void onMeasure(int wSpec, int hSpec) {
-        int w = MeasureSpec.getSize(wSpec);
-        int h = MeasureSpec.getSize(hSpec);
-        setMeasuredDimension(w, h);
-        int n = getChildCount();
-        for (int i = 0; i < n; i++) {
-            getChildAt(i).measure(MeasureSpec.makeMeasureSpec(w, MeasureSpec.EXACTLY),
-                    MeasureSpec.makeMeasureSpec(h, MeasureSpec.EXACTLY));
+    /** Re-apply the page transform; call after layout changes. */
+    public void applyTransforms() {
+        int w = getWidth();
+        if (w <= 0) return;
+        float scroll = getScrollX();
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            float offset = (i * w - scroll) / (float) w;   // 0 = centred, +-1 = one page away
+            float dist = Math.min(1f, Math.abs(offset));
+            // Only the current page and the one being dragged in are worth drawing. Marking
+            // the rest INVISIBLE keeps the neighbours from being re-rasterised on every
+            // frame of a swipe (elevation + clipToOutline makes that expensive).
+            int want = dist < 1.01f ? View.VISIBLE : View.INVISIBLE;
+            if (child.getVisibility() != want) child.setVisibility(want);
+            float alpha = 1f - 0.55f * dist;
+            if (Math.abs(child.getAlpha() - alpha) > 0.004f) child.setAlpha(alpha);
+            float scale = 1f - 0.06f * dist;
+            if (Math.abs(child.getScaleX() - scale) > 0.004f) {
+                child.setScaleX(scale);
+                child.setScaleY(scale);
+            }
+            child.setTranslationX(0f);
+            child.setRotationY(0f);
         }
     }
 
-    @Override
-    protected void onLayout(boolean changed, int l, int t, int r, int b) {
-        int w = getWidth();
-        int h = getHeight();
-        int n = getChildCount();
-        for (int i = 0; i < n; i++) {
+    /**
+     * Measure every page at the full container size.
+     *
+     * A ViewGroup that forgets onMeasure leaves its children unmeasured, so they get a
+     * zero-size layout and draw nothing -- the pager then looks empty even though the
+     * pages were added. Each page is forced to EXACTLY the container width/height so the
+     * inner ScrollView can fill it.
+     */
+    @Override protected void onMeasure(int widthSpec, int heightSpec) {
+        int width = MeasureSpec.getSize(widthSpec);
+        int height = MeasureSpec.getSize(heightSpec);
+        int childWidth = MeasureSpec.makeMeasureSpec(width, MeasureSpec.EXACTLY);
+        int childHeight = MeasureSpec.makeMeasureSpec(height, MeasureSpec.EXACTLY);
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            child.measure(childWidth, childHeight);
+        }
+        setMeasuredDimension(width, height);
+    }
+
+    @Override protected void onLayout(boolean changed, int l, int t, int r, int b) {
+        int w = r - l;
+        int h = b - t;
+        for (int i = 0; i < getChildCount(); i++) {
             getChildAt(i).layout(i * w, 0, (i + 1) * w, h);
         }
+        if (!settled) return;                  // do not fight an in-flight settle
         scrollTo(page * w, 0);
+        applyTransforms();
     }
 
-    @Override
-    public boolean onInterceptTouchEvent(MotionEvent e) {
+    @Override public void computeScroll() {
+        if (scroller.computeScrollOffset()) {
+            scrollTo(scroller.getCurrX(), 0);
+            applyTransforms();
+            postInvalidateOnAnimation();
+        } else if (!settled) {
+            settled = true;
+            applyTransforms();
+        }
+    }
+
+    @Override public boolean onInterceptTouchEvent(MotionEvent e) {
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getX();
@@ -104,43 +169,37 @@ public final class Pager extends ViewGroup {
                 lastX = downX;
                 dragging = false;
                 scroller.abortAnimation();
-                if (vt == null) vt = VelocityTracker.obtain();
-                vt.clear();
-                vt.addMovement(e);
+                settled = true;
                 return false;
             case MotionEvent.ACTION_MOVE: {
-                if (vt != null) vt.addMovement(e);
-                float dx = e.getX() - downX;
-                float dy = e.getY() - downY;
-                if (!dragging && Math.abs(dx) > touchSlop && Math.abs(dx) > Math.abs(dy) * 1.3f) {
-                    // 横向意图明确 → 由本容器接管
+                if (dragging) return true;
+                float dx = Math.abs(e.getX() - downX);
+                float dy = Math.abs(e.getY() - downY);
+                // Require a clear horizontal intent before stealing from a vertical scroller.
+                if (dx > touchSlop && dx > dy * 1.3f) {
                     dragging = true;
                     lastX = e.getX();
-                    requestDisallowInterceptTouchEvent(true);
                     return true;
                 }
                 return false;
             }
-            case MotionEvent.ACTION_UP:
-            case MotionEvent.ACTION_CANCEL:
-                dragging = false;
-                return false;
             default:
                 return false;
         }
     }
 
-    @Override
-    public boolean onTouchEvent(MotionEvent e) {
+    @Override public boolean onTouchEvent(MotionEvent e) {
         int w = getWidth();
         int n = getChildCount();
         if (w <= 0 || n == 0) return false;
         switch (e.getActionMasked()) {
             case MotionEvent.ACTION_DOWN:
                 downX = e.getX();
+                downY = e.getY();
                 lastX = downX;
                 dragging = false;
                 scroller.abortAnimation();
+                settled = true;
                 if (vt == null) vt = VelocityTracker.obtain();
                 vt.clear();
                 vt.addMovement(e);
@@ -150,7 +209,9 @@ public final class Pager extends ViewGroup {
                 if (vt != null) vt.addMovement(e);
                 float x = e.getX();
                 if (!dragging) {
-                    if (Math.abs(x - downX) > touchSlop) {
+                    float dx = Math.abs(x - downX);
+                    float dy = Math.abs(e.getY() - downY);
+                    if (dx > touchSlop && dx > dy * 1.3f) {
                         dragging = true;
                         lastX = x;
                     } else {
@@ -159,11 +220,16 @@ public final class Pager extends ViewGroup {
                 }
                 int delta = (int) (lastX - x);
                 lastX = x;
-                int want = getScrollX() + delta;
                 int max = (n - 1) * w;
-                if (want < 0) want = 0;
-                if (want > max) want = max;
+                int want = getScrollX() + delta;
+                if (want < 0 || want > max) {
+                    // Rubber-band: move only a fraction of the overscroll.
+                    int over = want < 0 ? want : want - max;
+                    int base = want < 0 ? 0 : max;
+                    want = base + (int) (over * EDGE_RESISTANCE);
+                }
                 scrollTo(want, 0);
+                applyTransforms();
                 return true;
             }
 
@@ -172,7 +238,7 @@ public final class Pager extends ViewGroup {
                 if (vt != null) vt.addMovement(e);
                 if (!dragging) {
                     recycleVt();
-                    return true;    // 点击交给子 View（本容器不处理）
+                    return true;    // a plain tap belongs to the child
                 }
                 float vx = 0f;
                 if (vt != null) {
@@ -181,15 +247,14 @@ public final class Pager extends ViewGroup {
                 }
                 recycleVt();
                 int cur = getScrollX();
-                int nearest = Math.round((float) cur / (float) w);
                 int target;
                 if (Math.abs(vx) > minFling) {
-                    // ⚠ 基准必须是**拖动开始时所在的页**（字段 page，拖动过程中不更新），
-                    // 不能拿 cur（松手时的像素偏移）去 round 之后再 ±1 —— 那样"拖了大半页 + 有速度"
-                    // 会叠加成跳两页（真机实测：一次左滑直接从第 1 页跳到第 3 页）。
-                    target = page + ((vx < 0) ? 1 : -1);   // 左滑（vx<0）→ 下一页
+                    // Baseline must be the page the drag *started* on (field {@code page},
+                    // not updated mid-drag). Rounding the release offset and then adding
+                    // +-1 double-counts and skips two pages on a fast half-page flick.
+                    target = page + (vx < 0 ? 1 : -1);
                 } else {
-                    target = nearest;
+                    target = Math.round((float) cur / (float) w);
                 }
                 if (target < 0) target = 0;
                 if (target > n - 1) target = n - 1;
@@ -202,18 +267,21 @@ public final class Pager extends ViewGroup {
         }
     }
 
+    @Override protected int getChildDrawingOrder(int count, int i) {
+        // Draw the nearest page last so its shadow/scale sits above the neighbours.
+        int w = getWidth();
+        if (w <= 0) return i;
+        int centre = Math.round((float) getScrollX() / (float) w);
+        int order = i + centre - count / 2;
+        if (order < 0) order += count;
+        if (order >= count) order -= count;
+        return order;
+    }
+
     private void recycleVt() {
         if (vt != null) {
             vt.recycle();
             vt = null;
-        }
-    }
-
-    @Override
-    public void computeScroll() {
-        if (scroller.computeScrollOffset()) {
-            scrollTo(scroller.getCurrX(), 0);
-            postInvalidateOnAnimation();
         }
     }
 }

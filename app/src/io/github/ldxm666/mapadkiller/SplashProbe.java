@@ -58,7 +58,7 @@ public final class SplashProbe {
         public final String tree;     // 前若干层类名（诊断用）
         public final View node;       // 命中的节点
         Result(String hit, String tree, View node) {
-            this.hit = hit; this.tree = tree; this.node = node;
+            this.hit = hit; this.tree = tree.toString(); this.node = node;
         }
         public boolean isAd() { return hit != null; }
     }
@@ -132,8 +132,10 @@ public final class SplashProbe {
      * 单靠挂容器方法会"hooks=0"。改成**在开屏窗口期扫整个 decor**，
      * 只要开屏容器和广告子树出现在窗口上就会被抓到。
      *
-     * 触发时机：onResume 后 600ms / 1600ms / 3000ms 三轮 + 30 帧帧驱动，覆盖面足够。
-     * 动作：只摘命中的**广告子树**，容器与品牌层原样保留。
+     * v2.1.7：只保留 600ms 一轮（原为 600/1600/3000 三轮）。
+     * 开屏广告已在**数据层**被掐断（见 TmapHooks：GDTADManager.initWith 与 isInitialized
+     * 返回 false、TGSplashAD.fetchAdOnly/preLoad 空转），视图树上不会再长出开屏广告子树；
+     * 每次 onResume 走三遍全树递归是纯固定开销，正是用户反馈"hook 卡顿"的来源之一。
      */
     public static synchronized void installActivitySweep(final SplashPhase phase, final String tag) {
         if (sweepInstalled) return;
@@ -149,11 +151,9 @@ public final class SplashProbe {
                                 final Activity act = (Activity) chain.getThisObject();
                                 if (act == null) return r;
                                 final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
-                                for (final long d : new long[]{600, 1600, 3000}) {
-                                    h.postDelayed(new Runnable() {
-                                        @Override public void run() { sweepActivity(act, tag, d); }
-                                    }, d);
-                                }
+                                h.postDelayed(new Runnable() {
+                                    @Override public void run() { sweepActivity(act, tag, 600); }
+                                }, 600);
                             } catch (Throwable ignored) {}
                             return r;
                         }

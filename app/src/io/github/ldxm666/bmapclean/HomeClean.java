@@ -216,6 +216,9 @@ public final class HomeClean {
             n += applyWeather(decor);
             n += applyFeed(decor);
             n += applyMine(decor);
+            n += applySearchChips(decor);
+            measurePanel(decor);
+            dumpComponentIds(decor);   // TEMP probe
 
             if (Cfg.debug()) {
                 H.log(Log.INFO, MainHook.TAG, "apply@" + at + "ms act="
@@ -326,15 +329,22 @@ public final class HomeClean {
     /**
      * 宫格文案 → 配置键。服务端可能下发别名（例如「公交地铁」/「公共交通」），
      * 所以做双向 contains；未知文案一律返回 false（**保持可见**，失效安全）。
+     *
+     * <p>遍历的是 {@link Spec#toolLabels()}（静态清单 ∪ 已发现文案），
+     * 与设置页生成开关用的清单**完全一致** —— 否则新发现文案会出现
+     * 「设置页有开关、勾了不生效」。
      */
     private static boolean toolCellHidden(String label) {
-        for (int i = 0; i < Spec.TOOLS.length; i++) {
-            String k = Spec.TOOLS[i];
+        String[] labels = Spec.toolLabels();
+        for (int i = 0; i < labels.length; i++) {
+            String k = labels[i];
             if (k.equals(label) || label.contains(k) || k.contains(label)) {
                 return !Cfg.visible(Spec.K_TOOL + k);
             }
         }
+        // 未知文案：保持可见，并回报给设置页补开关。
         if (Cfg.debug()) H.log(Log.INFO, MainHook.TAG, "toolGrid unknown cell kept visible: " + label);
+        BaiduHooks.reportUnknownTool(label);
         return false;
     }
 
@@ -709,6 +719,115 @@ public final class HomeClean {
      * ⚠ Talos（类 React / Yoga 自绘）设 GONE + 高度 0 **不塌陷**，只会留一块空白；
      * 所以这里优先**从父容器移除**，再由 {@link #restackColumn} 把后续兄弟块贴上来。
      */
+    // ══════════════════════════════════════════ ⑦ 搜索框下的快捷入口
+
+    /**
+     * 搜索框下面那排快捷入口的锚点文案。
+     *
+     * 这排是**服务端下发**的，文案会变（美食 / 加油站 / 景点 / 厕所 / 酒店 / 超市…），所以
+     * 不按某一个固定 id 抓，而是"同一容器里命中 ≥3 个"才算 —— 与首页其它区块同一套判定方式，
+     * 单条命中不足以确认，避免误伤搜索结果页里的同类词。
+     */
+    private static final String[] SEARCH_CHIP_WORDS = {
+            "美食", "加油站", "景点", "厕所", "酒店", "超市", "银行", "充电站", "停车场",
+    };
+
+    private static int applySearchChips(View decor) {
+        // 开关语义是"显示"，默认开 —— 所以只有用户主动关掉才会去动它。
+        if (Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ)) return 0;
+        try {
+            View row = findAnchorContainer(decor, SEARCH_CHIP_WORDS, 0, 140);
+            if (row == null) return 0;
+            java.util.List<ViewGroup> dirty = new java.util.ArrayList<ViewGroup>();
+            if (!collapse(row, dirty)) return 0;
+            for (int i = 0; i < dirty.size(); i++) restackColumn(dirty.get(i));
+            if (Cfg.debug()) Cfg.log("search chips hidden " + row.getClass().getSimpleName());
+            return 1;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
+
+    // ══════════════════════════════════════════ ⑧ 面板能上拉多高
+
+    /** 面板内剩余可见内容的实际高度（相对面板顶部）。0 = 还没量到。 */
+    private static volatile int sPanelContentHeight;
+
+    /**
+     * 量出首页面板里**剩余可见内容**的实际高度。
+     *
+     * 推荐 / 天气被摘掉之后，面板容器本身仍是展开态那个高度 —— Talos（Yoga 自绘）不会因为
+     * 子项变少就塌陷，于是上滑能拉出一大片空白。这里把内容底边记下来，交给
+     * {@link #clampPeek} 把 peek 高度夹住：用多少就上拉多少。
+     */
+    private static void measurePanel(View decor) {
+        try {
+            View panel = Anchors.find(decor, Anchors.ID_HOME_PANEL, Anchors.NUM_HOME_PANEL);
+            if (!(panel instanceof ViewGroup)) { sPanelContentHeight = 0; return; }
+            ViewGroup g = (ViewGroup) panel;
+            int bottom = 0;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                View c = g.getChildAt(i);
+                if (c == null || c.getVisibility() == View.GONE) continue;
+                if (c.getHeight() <= 0) continue;      // 还没量到尺寸
+                bottom = Math.max(bottom, c.getBottom());
+            }
+            sPanelContentHeight = bottom;
+        } catch (Throwable ignored) {
+            sPanelContentHeight = 0;
+        }
+    }
+
+    /**
+     * 把引擎算出的 peek 高度夹到"剩余内容高度"。
+     *
+     * <p>原来的实现只在首页被清到**全空**时才归零；只关掉推荐 / 天气时它照样返回整个面板的
+     * 高度，于是上滑依旧能拉出空白。量不到内容高度时**原样返回**，宁可保持原状也不乱改。
+     */
+    public static int clampPeek(int peek) {
+        int content = sPanelContentHeight;
+        if (content <= 0) return peek;
+        return Math.min(peek, content);
+    }
+
+    /**
+     * TEMP 探针：把首页所有 container/component 的 **id 名 + 纵向位置 + 高度** 打进 logcat。
+     *
+     * 那排快捷入口既不在 ViewBinding 槽位里，文本也不在无障碍树里 —— 说明它是 Talos（Yoga
+     * 自绘）的 component_containerN。模块已知 3=工具宫格 / 5=通勤 / 6=信息流，缺的正是它，
+     * 所以直接把全部 container 的真实 id 与高度列出来定位。确认后删掉。
+     */
+    private static boolean sIdProbed;
+
+    private static void dumpComponentIds(View decor) {
+        if (sIdProbed) return;
+        sIdProbed = true;
+        try {
+            java.util.List<String> out = new java.util.ArrayList<String>();
+            collectIds(decor, out, 0);
+            H.log(Log.INFO, MainHook.TAG, "idprobe: " + out);
+        } catch (Throwable ignored) {}
+    }
+
+    private static void collectIds(View v, java.util.List<String> out, int depth) {
+        if (v == null || depth > 40 || out.size() > 140) return;
+        try {
+            int id = v.getId();
+            if (id != 0 && v.getVisibility() != View.GONE) {
+                String name = null;
+                try { name = v.getResources().getResourceEntryName(id); } catch (Throwable ignored) {}
+                if (name != null && (name.contains("container") || name.contains("component")
+                        || name.contains("search"))) {
+                    out.add(name + "@top" + v.getTop() + "h" + v.getHeight());
+                }
+            }
+            if (v instanceof ViewGroup) {
+                ViewGroup g = (ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) collectIds(g.getChildAt(i), out, depth + 1);
+            }
+        } catch (Throwable ignored) {}
+    }
+
     private static boolean collapse(View v, java.util.List<ViewGroup> dirty) {
         if (v == null) return false;
         try {

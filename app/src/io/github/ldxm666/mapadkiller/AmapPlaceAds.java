@@ -15,6 +15,11 @@ public final class AmapPlaceAds {
     private AmapPlaceAds() {}
 
     public static void install(ClassLoader cl) throws Exception {
+        // ★ 安装期门控：place_recommend 开着（= 显示推荐流）⇒ 不需要过滤，一条都不装（零成本）。
+        if (Config.installGate(Config.K_PLACE_RECOMMEND)) {
+            H.log("event=hook_skipped key=place_recommend reason=switch_off");
+            return;
+        }
         final Class<?> request = H.cls(cl, "com.autonavi.minimap.ajx3.modules.net.ModuleRequest");
         final Class<?> callback = H.cls(cl, "com.autonavi.minimap.ajx3.core.JsFunctionCallback");
         final Class<?> module = H.cls(cl, "com.autonavi.minimap.ajx3.modules.AbstractModule");

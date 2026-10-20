@@ -37,7 +37,13 @@ final class AmapTabLayout {
                 return visible(tabId(tab)) ? chain.proceed() : null;
             }
         }, View.class);
-        Class<?> tab = H.cls(cl, "th6");
+        // ★ 17.01 适配：17.00 的 tab 模型类叫 `th6`，17.01 变成 `re6`。
+        // 单字母混淆类名每版必变，而下面 4 个 dispatchTab* 钩子全部被 `if (tab != null)`
+        // 守着 —— 名字一错不是报错，而是**整体静默跳过**，表现为「底部 tab 隐藏开关点了没反应」。
+        // 所以这里不硬编码：先从 `LiteTabBar.dispatchTabClickBefore` / `dispatchTabClick`
+        // 的真实参数表反推模型类，再退回混淆类名候选。
+        // 抗混淆锚点：`LiteTabBar` 是稳定类名，它的 `dispatchTab*(…,X)` 里的 X 就是 tab 模型类。
+        Class<?> tab = dispatchTabModel(cl);
         Class<?> bar = H.cls(cl, "com.autonavi.bundle.uitemplate.tab.LiteTabBar");
         Class<?> layout = H.cls(cl, "com.autonavi.bundle.uitemplate.tab.view.TabItemLayoutV2");
         H.hookSig(layout, "setTabId", "amap_embedded_home_entry", new XposedInterface.Hooker() {
@@ -91,7 +97,7 @@ final class AmapTabLayout {
             "amap_tab_background", new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     View view = (View) chain.getThisObject();
-                    int id = view.getResources().getIdentifier("tab_bg_layer", "id", MainHook.PKG_AMAP);
+                    int id = tabBackgroundId(view);
                     View background = id == 0 ? null : view.findViewById(id);
                     if (background != null) {
                         ViewGroup.LayoutParams lp = background.getLayoutParams();
@@ -107,6 +113,36 @@ final class AmapTabLayout {
         Object id = H.getObjectField(tab, "a");
         return id == null ? "" : String.valueOf(id);
     }
+
+    /**
+     * `tab_bg_layer` 的资源 id，整个进程只解析一次。
+     *
+     * <p>原来是每次 onMeasure 都调 {@code Resources.getIdentifier(name, type, pkg)} ——
+     * 那是一次真正的资源表查询（遍历/二分 type 表与 entry 表，还要拼字符串比较），
+     * 而 onMeasure 在滑动、指示器动画、面板展开收起时每秒会跑几十上百次。
+     * 同一个包名下的 id 恒定，缓存后每帧成本从「一次资源表查询」降为「一次 volatile 读」。
+     *
+     * <p>解析失败（=0）也照样记下：那说明这个版本没有该资源，重复查询只会更慢。
+     * 行为与旧实现完全一致（拿到 0 时同样跳过），所以不需要开关。
+     */
+    private static volatile boolean tabBgResolved;
+    private static volatile int tabBgId;
+
+    private static int tabBackgroundId(View view) {
+        if (tabBgResolved) return tabBgId;
+        synchronized (AmapTabLayout.class) {
+            if (tabBgResolved) return tabBgId;
+            int id = 0;
+            try {
+                id = view.getResources().getIdentifier("tab_bg_layer", "id", MainHook.PKG_AMAP);
+            } catch (Throwable ignored) {
+                id = 0;
+            }
+            tabBgId = id;
+            tabBgResolved = true;
+            return id;
+        }
+    }
     private static String viewId(View view) {
         if (view == null) return "";
         try { return String.valueOf(view.getClass().getMethod("getTabId").invoke(view)); }
@@ -116,5 +152,59 @@ final class AmapTabLayout {
         String label = "Nearby".equals(id) ? "探索" : "Message".equals(id) ? "长按说话"
             : "Taxi".equals(id) ? "打车" : "Mine".equals(id) ? "我的" : null;
         return label == null || Config.tabVisible(label);
+    }
+
+    /**
+     * 反推 tab 模型类（17.00 叫 {@code th6}，17.01 叫 {@code re6}，17.02 叫 {@code fh6}）。
+     *
+     * <p>为什么必须反推而不是写死：{@code dispatchTabClick(I,tab)} /
+     * {@code dispatchTabClickBefore(tab)} / {@code dispatchTabTouchEvent(tab,View,MotionEvent)}
+     * 这四个钩子都用 {@code H.hookSig(..., tab)} 做**精确签名**匹配。类名一错，
+     * {@code getDeclaredMethod} 直接抛 NoSuchMethod、{@code H.hookSig} 吞掉，结果是
+     * **四个钩子一起静默失效**，而日志里只有 {@code miss}，看起来像「这版本来就没这功能」。
+     *
+     * <p>顺序：
+     * <ol>
+     *   <li>{@code dispatchTabClickBefore} 的唯一非基本类型参数（17.01 = {@code re6}，17.02 = {@code fh6}）；</li>
+     *   <li>{@code dispatchTabClick(int, X)} 里那个非 int、非 View 的参数；</li>
+     *   <li>退回混淆类名候选 {@code fh6} / {@code re6} / {@code th6}。</li>
+     * </ol>
+     * 拿不到就返回 null，四个钩子照旧跳过（与旧行为一致，不会更糟）。
+     * <p>⚠ 反推出来的类名每版都变，**不要在注释或日志里把它当成稳定事实**；稳定性在
+     * {@code LiteTabBar} 这个类名和 {@code dispatchTab*} 这组方法名上。
+     */
+    private static Class<?> dispatchTabModel(ClassLoader cl) {
+        Class<?> bar = H.cls(cl, "com.autonavi.bundle.uitemplate.tab.LiteTabBar");
+        if (bar != null) {
+            try {
+                for (java.lang.reflect.Method m : bar.getDeclaredMethods()) {
+                    if (!"dispatchTabClickBefore".equals(m.getName())) continue;
+                    Class<?>[] types = m.getParameterTypes();
+                    if (types.length == 1 && !types[0].isPrimitive()) return types[0];
+                }
+                for (java.lang.reflect.Method m : bar.getDeclaredMethods()) {
+                    if (!"dispatchTabClick".equals(m.getName())) continue;
+                    for (Class<?> type : m.getParameterTypes()) {
+                        if (type.isPrimitive() || type == View.class) continue;
+                        return type;
+                    }
+                }
+            } catch (Throwable ignored) {
+                // fall through to the name candidates
+            }
+        }
+        // 17.02.0.1541 实测：tab 模型类是 `fh6`（`LiteTabBar` 的 dispatchTabClickBefore(Lfh6;)V、
+        // dispatchTabClick(Lfh6;)V、dispatchTabClick(ILfh6;)V、dispatchTabTouchEvent(Lfh6;View;MotionEvent)Z
+        // 四个方法里全是 Lfh6;）⇒ 上面的反推**依然能推出 fh6**，所以候选表只是兜底。
+        // ⚠ 注意 `th6` 在 17.02 是**存在的**，但已经不是 tab 模型类（被无关类占用）。
+        // 这也是为什么候选表必须把本版实测名 `fh6` 排在最前：万一反推失败而落到兜底，
+        // 至少拿到的是对的那个类，而不是一个"存在但无关"的同名类。
+        for (String name : new String[]{"fh6", "re6", "th6"}) {
+            Class<?> candidate = H.cls(cl, name);
+            if (candidate != null) return candidate;
+        }
+        H.log("event=anchor_miss anchor=LiteTabBar.dispatchTab*(tab) note=无法反推 tab 模型类，"
+                + "底部 tab 隐藏/点击拦截将跳过");
+        return null;
     }
 }

@@ -24,20 +24,197 @@ public final class Config {
     public static final String K_MY_FRIENDS = "my_friends";
     public static final String K_MAP_PROMO = "map_promo";
     public static final String K_MAP_POI = "map_poi";
+    /**
+     * 性能开关：完全**不装** {@code VMapSceneWrapper} 那三个 native 标注 hook。
+     *
+     * <p>为什么需要它：{@code nativeSetThirdLabelInfo} / {@code nativeSetUpdate3rdLabelsWithPoiData}
+     * / {@code nativeSetStylePointInfo} 是「每次刷新第三方标注 / POI / 样式点」都会走的方法。
+     * 如果高德在**渲染帧**里调用它们，我们的 hook 就变成**每帧一次 Java→hook→native 往返**，
+     * 表现为「整体掉帧」，而 {@code dumpsys gfxinfo} **测不到**（地图是 SurfaceView/GL
+     * 独立 surface，HWUI 计数器不含地图层）。用户反馈过「负优化掉帧」，所以留一个能把这
+     * 三个 hook **彻底不装**的开关，用于真机 A/B 定位。
+     *
+     * <p>语义：{@code selected(K_LABELS_OFF)==true} ⇒ **不装**这三个 hook（= 放弃第三方标注
+     * 过滤，回到高德原生行为）。默认 false（保持原行为）。
+     * 与 {@link #K_MAP_POI} 不是一回事：{@code map_poi} 控制「要不要过滤」，
+     * {@code labels_off} 控制「要不要挂 hook」——排查掉帧时用后者。
+     */
+    public static final String K_LABELS_OFF = "labels_off";
+    /**
+     * 性能开关（**默认 false = 不装**）：是否启用 {@code VMapSceneWrapper} 的三个 native 标注 hook。
+     *
+     * <p>默认关掉的原因见 {@code AmapPoiLayer.install()} 顶部注释：这三个方法在「每次刷新标注」
+     * 的热路径上，而地图是 SurfaceView/GL 独立 surface 渲染，{@code gfxinfo} 与
+     * {@code Choreographer#doFrame} 都测不到地图层 ⇒ 这类开销在现有测量手段下不可见，
+     * 只能默认关掉以消除「掉帧」风险。**功能不损失**：地图标注真正的实现是
+     * {@code libmapclean_labels.so} 在原生层改样式 protobuf，本类只是"补充过滤"。
+     *
+     * <p>需要时在面板里打开（写 prefs {@code labels_on=true}）。
+     */
+    public static final String K_LABELS_ON = "labels_on";
     public static final String K_PLACE_RECOMMEND = "place_recommend";
+    // ── 子进程省电（默认 true = 已拦截；面板里可关掉，用于排查「是不是我拦的」）──────
+    // 语义与 K_HOTWORD_OFF 一致：**true 表示"这个行为被关掉"**，不是"显示"。
+    // 三个键都落在 defaultVisible 的兜底 `return true` 上，所以默认值天然就是"已拦截"；
+    // 不要在 defaultVisible 里为它们加分支 —— 那个函数是"可见性"语义，混进来最容易写反。
+    public static final String K_SUBPROC_OFF = "subproc_off";
+    public static final String K_SUBPROC_WIDGET_OFF = "subproc_widget_off";
+    public static final String K_SUBPROC_LOTUSPOOL_OFF = "subproc_lotuspool_off";
+    // ── 阿里妈妈广告请求层（高德主 APK 里唯一的真·广告 SDK 通道，见 AmapAlimama.java）──
+    // 同样是 "true = 已拦截" 语义。开屏广告请求与广告埋点各一个开关，可分别回滚。
+    public static final String K_ALIMAMA_SPLASH_OFF = "alimama_splash_off";
+    public static final String K_ALIMAMA_LOG_OFF = "alimama_log_off";
+    // ── 阿里 UT 埋点（com.alibaba.analytics）初始化闸门，见 AmapTrack.java ──────────
+    // ⚠ 这是本轮**唯一默认开启的「谨慎类」拦截**。真机出现任何无法归因的异常时，第一个关它。
+    public static final String K_TRACK_OFF = "track_off";
+    // ── 周期任务 / 推送长连接（见 AmapJob.java；这两类才是真正的后台耗电源）──────────
+    // subproc_job_off：WorkManager 的两条执行通道（RescheduleReceiver + SystemJobService）
+    // push_off       ：ACCS/AGOO 安全档（不建长连接 + 不处理推送消息，**不杀服务** ⇒ 不会进退避重连）
+    // push_kill_off  ：ACCS/AGOO 激进档（ChannelService.onCreate 直接 stopSelf）
+    //                  ⚠ 单独成键的理由：A/B 采样若发现 CPU **反而上升**，可以只退这一档而不重新出包。
+    public static final String K_SUBPROC_JOB_OFF = "subproc_job_off";
+    public static final String K_PUSH_OFF = "push_off";
+    public static final String K_PUSH_KILL_OFF = "push_kill_off";
+    // push_hard_off：**真正掐断 ACCS0 线程**的硬档。前三档（push_off/push_kill_off/AccsJobService）
+    //   在真机上都装上了却拦不住 ACCS0（31% 单核），因为它们都不是长连接的真实起点。
+    //   这一档挂的是真实创建链：ConnectionServiceImpl.start / ConnectionServiceImpl.startChannelService /
+    //   BaseConnection.startChannelService / SpdyConnection.start / InAppConnection.start /
+    //   SpdyConnection$NetworkThread.run。代价：高德推送收不到。默认 true，面板可关。
+    public static final String K_PUSH_HARD_OFF = "push_hard_off";
     // The map's default page is kept; removing it invalidates navigation return targets.
     public static final String[] TABS = {"探索", "长按说话", "打车", "我的"};
     public static final String[] TOOLS = toolLabels();
+    /**
+     * 默认关闭的工具（只对 {@code AmapData.TOOLS} 里那 19 条 legacy 生效 —— 它们的 key 是
+     * {@code tool_<中文名>}；其余 ~95 条走 {@code tool_id_<id>}，本来就默认 false）。
+     *
+     * <p>⚠ **改这里是唯一对老设备立即生效的办法**：模块的默认值只在第一次安装时由
+     * `res/raw/default_config.json` 播种一次（设备侧 `_defaults_applied=true`），
+     * 之后改 JSON 不会重播；而删标记会重置用户全部开关。所以"改默认"必须走源码常量。
+     *
+     * <p>本轮新增 `打车` / `实时公交`：两者都是运营入口而非导航方式。
+     * `公交地铁` **保留可见** —— 它是导航方式（`amapuri://routePlan/home?t=1`），不是运营位。
+     */
     public static final java.util.Set<String> TOOLS_DEFAULT_OFF = new java.util.HashSet<String>(java.util.Arrays.asList(
-            "旅游度假", "车主服务", "景点游玩", "离线地图", "高德出行节"));
+            "旅游度假", "车主服务", "景点游玩", "离线地图", "高德出行节",
+            "打车", "实时公交"));
     public static final boolean FORCE_DEBUG = false;
     private static volatile SharedPreferences cached;
     private static volatile Map<String, ?> snapshot = Collections.emptyMap();
     private static volatile long expiresAt;
     private static final SharedPreferences.OnSharedPreferenceChangeListener listener = new SharedPreferences.OnSharedPreferenceChangeListener() {
-        @Override public void onSharedPreferenceChanged(SharedPreferences prefs, String key) { expiresAt = 0; }
+        @Override public void onSharedPreferenceChanged(SharedPreferences prefs, String key) {
+            expiresAt = 0;
+            refreshFlags();
+        }
     };
     private Config() {}
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 「零成本开关」：常驻 hook 的拦截器里**只读一个 volatile 字段**
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // 为什么需要：`Config.visible(key)` 每次都要 SystemClock.uptimeMillis() + map 查找
+    // + defaultVisible() 里若干 String.equals（2 秒缓存只省掉了复制整张表的开销，没省这些）。
+    // 常驻在热路径上的 hook（payload 过滤、tab 分发）每次调用都付这个代价。
+    //
+    // 做法：Flag 自己缓存一个 volatile boolean，值由 prefs 变更监听器刷新。
+    // 拦截器里就是 `if (!FLAG.on()) return chain.proceed();` —— 一次 volatile 读，
+    // 不查 map、不比时间。
+    //
+    // ⚠ 构造 Flag 时**不读 prefs**（模块 App 进程里 H.module 为 null，读会 NPE），
+    //    第一次 on() 才解析；解析失败按"开"处理（宁可拦截，不静默放行）。
+
+    /** 一个可被 prefs 变更刷新的布尔开关。子类实现 {@link #compute()}。 */
+    public abstract static class Flag {
+        private volatile boolean value;
+        private volatile boolean resolved;
+        protected Flag() { FLAGS.add(this); }
+        protected abstract boolean compute();
+        /** 零成本读：命中后只有一次 volatile 读。 */
+        public final boolean on() {
+            if (!resolved) resolve();
+            return value;
+        }
+        public final void resolve() {
+            boolean v;
+            try { v = compute(); } catch (Throwable t) { v = true; }
+            value = v;
+            resolved = true;
+        }
+    }
+
+    private static final java.util.List<Flag> FLAGS =
+            new java.util.concurrent.CopyOnWriteArrayList<Flag>();
+
+    /** 直接绑一个键的 Flag（compute 就是 Config.visible(key)）。 */
+    public static Flag flag(final String key) {
+        return new Flag() {
+            @Override protected boolean compute() { return Config.visible(key); }
+        };
+    }
+
+    private static void refreshFlags() {
+        for (Flag f : FLAGS) f.resolve();
+    }
+
+    // ── 热键表：这些键的读取走 Flag（一次 volatile 读），不走 map 查 ──────────────
+    // 只放**每次调用都会被读到**的键。新增键要加进下面的 static 块。
+    private static final java.util.Map<String, Flag> HOT =
+            new java.util.concurrent.ConcurrentHashMap<String, Flag>();
+
+    static {
+        // 工具面板（每个格子都要判一次）
+        hot(K_TOOLS_VISIBLE);
+        hot(K_TOOLS_ALLOWLIST);
+        // 首页推荐画布（compact() 每次面板重建都判 5 个）
+        hot(K_FEED_WEATHER);
+        hot(K_FEED_BOARD);
+        hot(K_FEED_CONTENT);
+        hot(K_FEED_FESTIVAL);
+        hot(K_RIDE_CARD_OFF);
+        // 地图挂件 / 我的页卡片
+        hot(K_MAP_PROMO);
+        hot(K_HOME_CHIPS);
+        // 热词（搜索框每次刷新都判）
+        hot(K_HOTWORD_OFF);
+    }
+
+    private static Flag hot(final String key) {
+        Flag existing = HOT.get(key);
+        if (existing != null) return existing;
+        Flag created = flag(key);
+        Flag raced = ((java.util.concurrent.ConcurrentHashMap<String, Flag>) HOT).putIfAbsent(key, created);
+        return raced != null ? raced : created;
+    }
+
+    /**
+     * 热键 → Flag；不在热键表里返回 null（调用方回退到 {@link #visible}）。
+     *
+     * <p>供 {@link AmapData.Settings#enabled} 使用：让 payload 过滤这类常驻热路径
+     * **只读一个 volatile**，不查 map、不比时间。
+     */
+    public static Flag hotFlag(String key) {
+        return key == null ? null : HOT.get(key);
+    }
+
+    /**
+     * 安装期门控：开关关掉时**根本不装**对应 hook。
+     *
+     * <p>语义与 {@link #visible} 一致（读不到就按默认值），但只在 install 时调用一次。
+     * 副作用：**改这类开关必须强停并重开高德才生效** —— 这是"关闭 = 零成本"的必然代价，
+     * 面板的组说明里要如实写。
+     */
+    public static boolean installGate(String key) {
+        try { return visible(key); } catch (Throwable t) { return true; }
+    }
+
+    /**
+     * Drop the cached snapshot so the next read reflects a write made in this process.
+     * The embedded panel writes through the same preferences it reads, and without this
+     * the UI would keep showing the previous value for up to two seconds.
+     */
+    public static void invalidate() { expiresAt = 0; }
     private static String[] toolLabels() {
         String[] out = new String[AmapData.TOOLS.length];
         for (int i = 0; i < out.length; i++) out[i] = AmapData.TOOLS[i][1];
@@ -49,8 +226,16 @@ public final class Config {
         if (key != null && key.startsWith("tool_id_")) return false;
         if (key != null && key.startsWith(K_TOOL_PREFIX))
             return !TOOLS_DEFAULT_OFF.contains(key.substring(K_TOOL_PREFIX.length()));
+        // 「设置家 / 设置单位 / 常去地点」 is on by default.
+        //
+        // It used to default to off as part of the compact-homepage work, and that is what the
+        // user saw as "设置家无效": the row is produced by the app's own HomeCompanyBuilderV3,
+        // the module only decides whether to let it through, so an off default means the row is
+        // simply never there -- with a switch that has to be found first and a home page that
+        // has to be rebuilt before it takes effect. The switch still hides the row for anyone
+        // who wants the shorter panel.
         return !K_HOME_QUICK_ROW.equals(key) && !K_FEED_BOARD.equals(key) && !K_FEED_FESTIVAL.equals(key)
-            && !K_FEED_WEATHER.equals(key) && !K_FEED_CONTENT.equals(key) && !K_HOME_CHIPS.equals(key)
+            && !K_FEED_WEATHER.equals(key) && !K_FEED_CONTENT.equals(key)
             && !K_MY_FRIENDS.equals(key) && !K_MAP_PROMO.equals(key);
     }
     public static SharedPreferences prefs() {
@@ -80,6 +265,9 @@ public final class Config {
     public static boolean selected(String key) { return Boolean.TRUE.equals(currentValues().get(key)); }
     /** UI and hooks use the same default when the tool allowlist is active. */
     public static boolean readVisible(SharedPreferences prefs, String key) { return value(prefs.getAll(), key); }
+    /** Same rule, but against an already-fetched map -- the settings page reads every
+     *  key at once instead of copying the whole table once per switch. */
+    public static boolean readVisible(java.util.Map<String, ?> values, String key) { return value(values, key); }
     private static boolean value(Map<String, ?> values, String key) {
         Object stored = values.get(key);
         if (stored instanceof Boolean) return (Boolean) stored;

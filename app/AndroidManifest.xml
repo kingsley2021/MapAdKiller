@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.ldxm666.mapadkiller"
-    android:versionCode="212"
-    android:versionName="2.1.2">
+    android:versionCode="222"
+    android:versionName="2.2.2">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
@@ -93,6 +93,18 @@
             android:exported="true">
             <intent-filter>
                 <action android:name="io.github.ldxm666.bmapclean.REPORT" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+            腾讯侧：同上。除了钩子状态，这条通道还承载「学到的首页工具目录」——
+            腾讯的工具列表由服务端下发，安装包里没有静态目录，只能从真实进程里学回来。
+        -->
+        <receiver
+            android:name="io.github.ldxm666.tmapclean.ReportReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.ldxm666.tmapclean.REPORT" />
             </intent-filter>
         </receiver>
     </application>

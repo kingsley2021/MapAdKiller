@@ -225,6 +225,10 @@ public final class App extends Application implements XposedServiceHelper.OnServ
 
     public static void onBind(XposedService s) {
         service = s;
+        // 这条日志同时在给"设置页百度那一页能不能读写"提供判据：
+        // 以前合并没有把本类接上，service 恒为 null，百度组每个开关写完都会被回滚并弹
+        // 「LSPosed 服务未连接」；日志里也永远看不到这一行。
+        android.util.Log.i(TAG, "onServiceBind ok (driven by mapclean.App)");
         migrateMapLabels(s);
         ensureToken();
         notifyReport();

@@ -36,6 +36,8 @@ public final class Spec {
     public static final String K_WX_CARD = "wx_card";
     public static final String K_AI_NOW = "ai_now_card";
     public static final String K_MAP_POI = "map_poi";
+    /** 搜索框下面那排快捷入口（美食 / 加油站 / 景点 / 厕所 / 酒店…）。默认显示。 */
+    public static final String K_SEARCH_CHIPS = "search_chips";
 
     // ── 推荐信息流（展开态：频道栏 + 优质内容精选 + 推荐卡片，全部由 Talos 渲染） ──
     /** 整块推荐信息流 = component_container6 */
@@ -145,6 +147,7 @@ public final class Spec {
     public static final int CAT_FEED = 5;
     public static final int CAT_MINE = 6;
     public static final int CAT_MAP = 7;
+    public static final int CAT_SEARCH = 8;
 
     /** 频道栏文案锚点（需同一容器内同时命中 ≥2 个才算频道栏，避免误伤卡片文案） */
     public static final String[] CHIP_ANCHORS = {"推荐", "看世界", "成都市"};
@@ -161,6 +164,13 @@ public final class Spec {
      *   row1 = 驾车 / 公共交通 / 打车 / 步行 / 骑行
      *   row2 = 实时公交 / 订酒店 / 问一问 / 优惠加油 / 顺风车 / 更多
      *   row3 = 爱去榜 / 租车 / 叫代驾 / 录语音包 / 更多
+     *
+     * <p>22.0.50 起宫格换了文案（真机截图实测）：
+     *   row1 = 驾车 / 公共交通 / 打车 / 步行
+     *   row2 = 智行 / 新能源 / 停车助手
+     *   row3 = 新手导航 / 现金签到 / 测距
+     * 新文案同样加进清单 —— 否则设置页不会为它们生成开关，格子就只能整块开关、不能单点控制。
+     *
      * 也就是说宫格内容是**服务端下发**的，行数/文案会变（这正是"第三行没有开关"的根因）。
      * 因此除了这份静态清单，设置页还会合并 hook 侧回报的**实际发现文案**（见 Spec.mergeDiscovered），
      * 未知文案在没被回报前一律保持可见（失效安全）。
@@ -169,6 +179,8 @@ public final class Spec {
             "驾车", "公共交通", "打车", "步行", "骑行",
             "实时公交", "订酒店", "问一问", "优惠加油", "更多",
             "顺风车", "爱去榜", "租车", "叫代驾", "录语音包",
+            // 22.0.50 新增
+            "智行", "新能源", "停车助手", "新手导航", "现金签到", "测距",
     };
 
     /** hook 侧发现、经广播回报上来的额外格子文案（设置页合并展示） */
@@ -194,6 +206,70 @@ public final class Spec {
         for (int i = 0; i < TOOLS.length; i++) all.add(TOOLS[i]);
         all.addAll(DISCOVERED);
         return all.toArray(new String[0]);
+    }
+
+    // ── 已发现文案的**持久化** ───────────────────────────────────────────
+    // 广播接收（ReportReceiver）与面板渲染都在宿主进程里，但进程会被回收；
+    // 只靠内存里的 DISCOVERED，重开百度后新格子的开关又会消失。所以落盘，
+    // 进程启动时（BaiduHooks.install）读回。
+
+    /** 与 ReportReceiver 同一个 SharedPreferences 文件名 */
+    public static final String P_DISCOVERED = ReportReceiver.P;
+    private static final String KEY_DISCOVERED = "discovered_tools";
+    private static final String SEP = "\n";
+
+    private static volatile android.content.Context sCtx;
+    private static volatile boolean sLoaded;
+
+    /** 宿主进程 Application（由 BaiduHooks.install 注入）；为 null 时退化为纯内存模式。 */
+    public static void attach(android.content.Context ctx) {
+        if (ctx != null) sCtx = ctx.getApplicationContext();
+    }
+
+    /** 把已发现文案落盘（逗号/换行分隔；文案里不会含换行） */
+    public static synchronized void persistDiscovered() {
+        android.content.Context c = sCtx;
+        if (c == null) return;
+        try {
+            StringBuilder sb = new StringBuilder();
+            for (String s : DISCOVERED) { if (sb.length() > 0) sb.append(SEP); sb.append(s); }
+            c.getSharedPreferences(P_DISCOVERED, android.content.Context.MODE_PRIVATE)
+                    .edit().putString(KEY_DISCOVERED, sb.toString()).commit();
+        } catch (Throwable t) {
+            H.log(android.util.Log.WARN, MainHook.TAG, "discovered persist failed: " + t);
+        }
+    }
+
+    /** 进程启动时读回已发现文案；只做一次。 */
+    public static void loadDiscovered() {
+        if (sLoaded) return;
+        sLoaded = true;
+        android.content.Context c = sCtx;
+        if (c == null) return;
+        try {
+            String raw = c.getSharedPreferences(P_DISCOVERED, android.content.Context.MODE_PRIVATE)
+                    .getString(KEY_DISCOVERED, "");
+            if (raw == null || raw.length() == 0) return;
+            java.util.ArrayList<String> list = new java.util.ArrayList<>();
+            for (String s : raw.split(SEP)) if (s != null && s.length() > 0) list.add(s);
+            if (mergeDiscovered(list)) {
+                H.log(android.util.Log.INFO, MainHook.TAG,
+                        "discovered tool labels restored: " + list.size());
+            }
+        } catch (Throwable t) {
+            H.log(android.util.Log.WARN, MainHook.TAG, "discovered load failed: " + t);
+        }
+    }
+
+    /**
+     * 供 **hook 侧** 使用的同一份清单（静态清单 ∪ 已发现文案）。
+     *
+     * <p>必须与设置页用同一份，否则会出现「设置页有开关、勾了却不生效」：
+     * 设置页按 {@link #allToolLabels()} 生成开关，hook 侧若只遍历静态 {@link #TOOLS}，
+     * 那么新发现文案的键在 hook 侧根本不被查询，开关就是个摆设。
+     */
+    public static synchronized String[] toolLabels() {
+        return allToolLabels();
     }
 
     public static final class Row {
@@ -233,9 +309,10 @@ public final class Spec {
         Row[] bar=new Row[1+TABS.length];
         bar[0]=new Row(K_BAR,"显示底部入口栏","开关勾选表示显示；关闭表示隐藏。",true);
         for(int i=0;i<TABS.length;i++)bar[i+1]=new Row(K_TAB+TABS[i],TABS[i],i==0?"整栏显示时保留首页，确保可以返回地图。":null,false);
-        Row[] tools=new Row[1+TOOLS.length];
+        String[] toolList = allToolLabels();
+        Row[] tools=new Row[1+toolList.length];
         tools[0]=new Row(K_TOOLS,"显示首页工具宫格","关闭整块时，所有工具入口一起隐藏。",true);
-        for(int i=0;i<TOOLS.length;i++)tools[i+1]=new Row(K_TOOL+TOOLS[i],TOOLS[i],null,false);
+        for(int i=0;i<toolList.length;i++)tools[i+1]=new Row(K_TOOL+toolList[i],toolList[i],null,false);
         CATS=new Cat[]{
             new Cat(CAT_BAR,"底部入口栏","勾选为显示；隐藏后剩余入口均分。",bar),
             new Cat(CAT_TOOLS,"首页工具宫格","单独控制工具；保留原有点击功能。",tools),
@@ -253,6 +330,8 @@ public final class Spec {
                 new Row(K_MINE_CAR,"我的车",null,false),new Row(K_MINE_CARNAV,"导航车标（区块）",null,false),
                 new Row(K_MINE_BUILD,"全民共建 / 反馈中心",null,false),new Row(K_MINE_SPORT,"百度运动",null,false),new Row(K_MINE_GRID,"顶部图标宫格",null,false)}),
             new Cat(CAT_MAP,"地图标注","统一关闭兴趣点图标和店名，保留地名、街道和城市名称。修改后彻底关闭并重新打开百度生效。",BaiduLabelSettings.rows()),
+            new Cat(CAT_SEARCH,"搜索区","搜索框下方那排快捷入口。",new Row[]{
+                new Row(K_SEARCH_CHIPS,"显示搜索框快捷入口","关掉后搜索框下面那排（美食 / 加油站 / 景点 / 厕所 / 酒店…）整体隐藏。",true)}),
             new Cat(CAT_DIAG,"诊断","百度 22.0.0 版本适配；改动后重启百度生效。",new Row[]{new Row(Cfg.K_DEBUG,"调试日志",null,false)})
         };return CATS;
     }

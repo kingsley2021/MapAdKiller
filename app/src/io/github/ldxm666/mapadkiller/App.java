@@ -197,17 +197,32 @@ public final class App extends Application implements XposedServiceHelper.OnServ
     private static void migrateAmapHomepage(XposedService s) {
         try {
             android.content.SharedPreferences p = s.getRemotePreferences(Config.PREF_GROUP);
-            if (p.getInt("_amap_protocol_schema", 0) >= 210) return;
-            org.json.JSONObject previous = new org.json.JSONObject();
-            String[] hidden = {Config.K_FEED_WEATHER, Config.K_FEED_BOARD, Config.K_FEED_CONTENT,
-                    Config.K_FEED_FESTIVAL, Config.K_HOME_CHIPS};
-            for (String key : hidden) previous.put(key, p.getBoolean(key, true));
-            previous.put(Config.K_RIDE_CARD_OFF, p.getBoolean(Config.K_RIDE_CARD_OFF, true));
+            int schema = p.getInt("_amap_protocol_schema", 0);
+            if (schema >= 211) return;
             android.content.SharedPreferences.Editor edit = p.edit();
-            for (String key : hidden) edit.putBoolean(key, false);
-            edit.putBoolean(Config.K_RIDE_CARD_OFF, true)
-                .putString("_amap_legacy_home_snapshot", previous.toString())
-                .putInt("_amap_protocol_schema", 210).commit();
+            if (schema < 210) {
+                org.json.JSONObject previous = new org.json.JSONObject();
+                String[] hidden = {Config.K_FEED_WEATHER, Config.K_FEED_BOARD, Config.K_FEED_CONTENT,
+                        Config.K_FEED_FESTIVAL, Config.K_HOME_CHIPS};
+                for (String key : hidden) previous.put(key, p.getBoolean(key, true));
+                previous.put(Config.K_RIDE_CARD_OFF, p.getBoolean(Config.K_RIDE_CARD_OFF, true));
+                for (String key : hidden) edit.putBoolean(key, false);
+                edit.putBoolean(Config.K_RIDE_CARD_OFF, true)
+                    .putString("_amap_legacy_home_snapshot", previous.toString());
+            }
+            // v211: 「设置家 / 设置单位 / 常去地点」 is a core map feature, not part of the
+            // recommendation feed, so it is not hidden by default any more. The 210 step above
+            // switched it off for everybody, which is what read as "设置家无效"; this restores
+            // it only for installs whose own snapshot says it used to be on, so an explicit
+            // choice made before that migration is never overwritten.
+            boolean restore = true;
+            try {
+                restore = new org.json.JSONObject(
+                        p.getString("_amap_legacy_home_snapshot", "{}"))
+                        .optBoolean(Config.K_HOME_CHIPS, true);
+            } catch (Throwable ignored) { }
+            if (restore) edit.putBoolean(Config.K_HOME_CHIPS, true);
+            edit.putInt("_amap_protocol_schema", 211).commit();
         } catch (Throwable t) { android.util.Log.w("MapCleanApp", "homepage migration", t); }
     }
 }

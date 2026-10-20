@@ -59,6 +59,22 @@ public final class H {
         try { return cl.loadClass(name); } catch (Throwable t) { return null; }
     }
 
+    /**
+     * Resolve one method by exact signature, or null.
+     *
+     * Used where the module needs to call the original again later -- a Chain can only be
+     * proceeded once, so anything that has to be re-run (rebuilding the home panel when a
+     * switch changes) needs a real Method handle rather than the chain.
+     */
+    public static Method method(Class<?> c, String name, Class<?>... params) {
+        if (c == null) return null;
+        try {
+            Method m = c.getDeclaredMethod(name, params);
+            m.setAccessible(true);
+            return m;
+        } catch (Throwable t) { return null; }
+    }
+
     /** 按名 hook：本类 + 全部父类中同名方法（等价旧 hookAllMethods），返回命中数 */
     public static int hookAll(Class<?> c, String method, String id, XposedInterface.Hooker hooker) {
         if (c == null) return 0;

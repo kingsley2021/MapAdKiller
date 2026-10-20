@@ -123,7 +123,12 @@ public final class AmapToolCatalog {
         {"479", "天天领福利", "其他", "amapuri://webview/amaponline?url=https%3A%2F%2Fc3-pha.amap.com%2F2025ActFissionSite%2Findex.html%3FareaId%3Damap_ugliebiansite_00001%26gd_from%3Djingang&sourceApplication=jingang&hide_title=0", "https://gw.alicdn.com/imgextra/i4/O1CN016lN1JEDeruI0Gzew_!!6000000001063-2-tps-135-135.png"},
         {"546", "长征星火", "其他", "amapuri://webview/amaponline?url=https%3A%2F%2Fcz.amap.com%2Fprod%2Fpublish%2Fcz-front-h5%2Famap%2Findex.html%3Fgd_from%3Dtools_box&forbid_show_loading=1&hide_title=1&login_check=1", "https://gw.alicdn.com/imgextra/i4/O1CN01dBvIGGEbHNE0Gzew_!!6000000003411-2-tps-135-135.png"},
         {"558", "懂鸟", "其他", "amapuri://applets/platformapi/startapp?appId=2021003148626361", "https://gw.alicdn.com/imgextra/i3/O1CN01VzrAWpb3yoB0Gzew_!!6000000000889-2-tps-135-135.png"},
-        {"567", "真探中心", "其他", "amapuri://webview/amaponline?url=https%3A%2F%2Fc3-activity.amap.com%2Fapp%2Famap-h5%2Fdetective-center%2Findex.html%3Fgd_from%3Dnew_jingangwei&sourceApplication=zt&urlType=0&contentType=autonavi&hide_title=1", "https://gw.alicdn.com/imgextra/i2/O1CN01AjIO5QbopJH0Gzew_!!6000000001519-2-tps-135-135.png"}
+        {"567", "真探中心", "其他", "amapuri://webview/amaponline?url=https%3A%2F%2Fc3-activity.amap.com%2Fapp%2Famap-h5%2Fdetective-center%2Findex.html%3Fgd_from%3Dnew_jingangwei&sourceApplication=zt&urlType=0&contentType=autonavi&hide_title=1", "https://gw.alicdn.com/imgextra/i2/O1CN01AjIO5QbopJH0Gzew_!!6000000001519-2-tps-135-135.png"},
+        // 「更多工具」是工具栏的固定入口，不是运营位，所以不在上面的目录数据里。
+        // 但它是用户最常想关的一个（关掉后首页只剩真正在用的几个），
+        // 缺了它会让整个工具开关体系看起来不完整。id 86 与 AmapData.TOOLS 一致，
+        // 因此 key 仍然由 AmapToolCatalog.key("86") 统一给出。
+        {"86", "更多工具", "其他", "amapuri://ajx?path=path://amap_bundle_toolbox/src/pages/ToolboxHomepage.page.js&style=Page&animation=1", "@Img_icon_aiqs_tool_more_Png"}
     };
     public static final String[] GROUPS = {"出行", "高德精选", "服务", "小程序", "小工具", "其他"};
     private static final Map<String, String> KEYS;

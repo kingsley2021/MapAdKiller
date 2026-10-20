@@ -10,8 +10,12 @@ final class AmapToolIcons {
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     static void load(final ClassLoader cl, final ImageView view, final String image, JSONObject boot, String id) {
         String token = image.startsWith("@") ? image : "";
-        for (int i = 0; i < 10; i++) if (id.equals(boot.optString("id" + i))) {
-            token = boot.optString("imageToken" + i, token); break;
+        // boot/id are optional: callers that rebuild a row from an already-resolved payload
+        // pass null. id.equals() used to NPE here and the icon silently vanished.
+        if (id != null && boot != null) {
+            for (int i = 0; i < 10; i++) if (id.equals(boot.optString("id" + i))) {
+                token = boot.optString("imageToken" + i, token); break;
+            }
         }
         final String imageToken = token;
         Runnable bind = new Runnable() {
@@ -35,5 +39,17 @@ final class AmapToolIcons {
         // Picasso requires the main looper; an icon failure must not replace the tool list.
         if (Looper.myLooper() == Looper.getMainLooper()) bind.run();
         else MAIN.post(bind);
+    }
+
+    /**
+     * The home-chips payload names its drawable with iconToken, while the tool list uses
+     * icon/imageV2. Reading every spelling keeps one loader usable for both.
+     */
+    static String tokenOf(JSONObject item) {
+        for (String key : new String[]{"iconToken", "imageToken", "icon", "iconV2", "imageV2", "image"}) {
+            String value = item.optString(key);
+            if (value.length() > 0 && value.startsWith("@")) return value;
+        }
+        return "";
     }
 }

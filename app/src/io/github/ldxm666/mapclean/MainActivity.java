@@ -33,7 +33,6 @@ import android.widget.CompoundButton;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
-import android.widget.Switch;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -75,13 +74,53 @@ public final class MainActivity extends Activity {
     private LinearLayout bottomBar;
     private FrameLayout.LayoutParams barLp;
 
+    // ── v2.2.0 版式骨架：vertical root = hero(含 tabs) + pager(weight) + 浮层底栏 ──
+    /** 活动内容根：FrameLayout 遮罩层，承载页面列 + 悬浮底栏 */
+    private FrameLayout overlay;
+    /** 页面列（垂直）：hero + pager */
+    private LinearLayout column;
+    private LinearLayout hero;
+    /** 顶部右侧的框架状态药丸（已连接 / 作用域） */
+    private LinearLayout navPill;
+    /** hero 里的实时指标行容器 */
+    private LinearLayout metricRow;
+
     // ── v2.0.0 分页：百度 / 高德 / 其他，左右滑动切换 ──────────────────────
     private Pager pager;
     private LinearLayout tabBar;
     private final java.util.List<TextView> tabChips = new java.util.ArrayList<>();
     private final java.util.List<android.widget.ScrollView> pages = new java.util.ArrayList<>();
     /** 百度那一页的开关（配置 group 与高德不同，要单独同步） */
-    private final Map<String, Switch> bmapSwitches = new LinkedHashMap<>();
+    private final Map<String, GlassSwitch> bmapSwitches = new LinkedHashMap<>();
+    /** 腾讯那一页的开关（第三个 group：tmapclean_config） */
+    private final Map<String, GlassSwitch> tmapSwitches = new LinkedHashMap<>();
+
+    /**
+     * 设置页搜索：跨「百度 / 高德 / 腾讯 / 其他」四页过滤所有开关。
+     *
+     * <p>为什么值得单独一条：腾讯的工具目录在真机上有 90 多项（内置表 + 服务端下发合并），
+     * 高德的「更多工具」有 100 多项。没有搜索时用户得在一个折叠抽屉里翻很久，
+     * 而这恰恰是他唯一想用的功能。悬浮面板里早有同款（FloatingPanel.buildSearch），
+     * 设置页一直缺，这一条补上。
+     */
+    private SwitchFinder finder;
+
+    /** 展开状态快照：搜索时全部展开，退出搜索时按这个还原。 */
+    private final Map<Sec, Boolean> expandSnapshot = new LinkedHashMap<>();
+
+    // ── 搜索：页下标必须与 onCreate 里 pager.addView / addTab 的顺序一致 ──────────
+    private static final int PAGE_BAIDU = 0, PAGE_AMAP = 1, PAGE_TMAP = 2, PAGE_OTHER = 3;
+
+    /**
+     * 把一个开关报给搜索索引。
+     *
+     * <p>调用点在开关工厂里而不是页面构建循环里：那样才能同时拿到“界面显示的标题”
+     * 和“配置键”，而不必让调用方再传一遍。
+     */
+    private static void index(SwitchFinder f, String key, String title, String note, int page) {
+        if (f == null || key == null) return;
+        try { f.index(key, title, note, page); } catch (Throwable ignored) { }
+    }
 
     private static final int GLASS_R = 22;   // 卡片圆角 dp
     private static final int HEAD_R = 18;    // 抽屉头/按钮圆角 dp
@@ -114,21 +153,36 @@ public final class MainActivity extends Activity {
             }
         }
         dark = isDarkMode();
-        // 深浅两套框架主题：对话框（AlertDialog）会跟随 Activity 主题，省掉自建 styles.xml
+        // Two framework themes so AlertDialog follows day/night without a styles.xml.
         setTheme(dark ? android.R.style.Theme_Material_NoActionBar
                       : android.R.style.Theme_Material_Light_NoActionBar);
         getWindow().setBackgroundDrawable(new ColorDrawable(cBg()));
 
-        page = new FrameLayout(this);
-        setContentView(page);
-        addBlobs(page);
+        // Layout: ONE vertical flow -- hero+tabs (wrap) then pager (weight 1).
+        // The decorative blooms live in a sibling overlay FrameLayout that is inserted
+        // behind everything with a 0-height..MATCH_PARENT fill, instead of being a
+        // weighted band (a weighted blobs band stole half the screen and pushed the
+        // cards down, which is how the previous build ended up with a giant disc and
+        // no visible hero).
+        // Structure:
+        //   frame (FrameLayout, the activity content)
+        //     ├─ column (LinearLayout, vertical)  hero(+tabs) ─ pager(weight 1)
+        //     └─ bottomBar (floating glass bar, bottom-centre)
+        // The bar is an overlay so it never steals height from the pager, and the pager
+        // gets a real weighted height instead of an absolute topMargin guess.
+        overlay = new FrameLayout(this);
+        overlay.setBackgroundColor(cBg());
 
-        // ── 顶部固定区：状态卡 + 分页标签 ──────────────────────────────
-        final LinearLayout top = new LinearLayout(this);
-        top.setOrientation(LinearLayout.VERTICAL);
-        int p = dp(16);
-        top.setPadding(p, dp(10), p, dp(2));
-        buildHero(top);
+        column = new LinearLayout(this);
+        column.setOrientation(LinearLayout.VERTICAL);
+        overlay.addView(column, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        hero = new LinearLayout(this);
+        hero.setOrientation(LinearLayout.VERTICAL);
+        int pad = dp(16);
+        hero.setPadding(pad, dp(8), pad, 0);
+        buildHero(hero);
 
         tabBar = new LinearLayout(this);
         tabBar.setOrientation(LinearLayout.HORIZONTAL);
@@ -136,22 +190,32 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         tlp.topMargin = dp(10);
-        top.addView(tabBar, tlp);
+        hero.addView(tabBar, tlp);
 
-        FrameLayout.LayoutParams topLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        topLp.gravity = Gravity.TOP;
-        page.addView(top, topLp);
+        // 搜索条：tab 下方、pager 上方，四页共用一条。
+        // “其他”页只有两三项，SwitchFinder.attach() 会把整条 GONE 掉，不占高度。
+        finder = new SwitchFinder(this, dark);
+        finder.setPageJumper(new SwitchFinder.PageJumper() {
+            @Override public void jump(int page) {
+                if (pager != null) pager.setPage(page, true);
+            }
+        });
+        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, UiKit.dp(this, 42));
+        flp.topMargin = dp(10);
+        hero.addView(finder.bar(), flp);
+        hero.addView(finder.resultsHost(), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        // ── 分页容器 ──────────────────────────────────────────────────
+        column.addView(hero, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         pager = new Pager(this);
         pager.setOnPageChanged(new Pager.OnPageChanged() {
             @Override public void onPageChanged(int index) { selectTab(index); }
         });
-        final FrameLayout.LayoutParams plp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
-        plp.topMargin = dp(180);        // 先给个近似值，量到顶部真实高度后再校正
-        page.addView(pager, plp);
+        column.addView(pager, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         if (embedded()) {
             pager.addView(embeddedAmap() ? buildAmapPage() : buildBaiduPage());
@@ -162,64 +226,105 @@ public final class MainActivity extends Activity {
             addTab("百度地图");
             addTab("高德地图");
         }
+        pager.addView(buildTmapPage());
+        addTab("腾讯地图");
         pager.addView(buildOtherPage());
         addTab("其他");
-        selectTab(0);
 
         buildBottomBar();
+        overlay.addView(bottomBar, barLp);
 
-        // 顶部高度是动态的（状态文案可能换行）→ 布局完成后把分页区顶边校正一次
-        top.post(new Runnable() {
+        setContentView(overlay);
+
+        // Decorative blooms: a full-bleed overlay behind the bar but above the page
+        // background would block touches, so they go into the WINDOW background instead.
+        applyWindowBloom();
+
+        // Reserve the hero's real height inside the pager once it is measured, then
+        // let each page scroll under the floating glass bar via its bottom padding.
+        hero.post(new Runnable() {
             @Override public void run() {
-                try {
-                    FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) pager.getLayoutParams();
-                    int want = top.getHeight() + dp(2);
-                    if (lp.topMargin != want) {
-                        lp.topMargin = want;
-                        pager.setLayoutParams(lp);
+                applyHeroInset();
+                pager.post(new Runnable() {
+                    @Override public void run() {
+                        pager.setPage(0, false);
+                        selectTab(0);
+                        animateIn();
                     }
-                } catch (Throwable ignored) {}
+                });
             }
         });
 
-        page.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+        overlay.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
-                int nav = insets.getSystemWindowInsetBottom();
+                int top = insets.getSystemWindowInsetTop();
+                int bottom = insets.getSystemWindowInsetBottom();
+                hero.setPadding(hero.getPaddingLeft(), dp(8) + top,
+                        hero.getPaddingRight(), hero.getPaddingBottom());
                 if (barLp != null) {
-                    barLp.setMargins(dp(14), 0, dp(14), nav + dp(14));
+                    barLp.setMargins(dp(14), 0, dp(14), bottom + dp(14));
                     bottomBar.setLayoutParams(barLp);
                 }
                 for (int i = 0; i < pages.size(); i++) {
-                    pages.get(i).setPadding(0, 0, 0, nav + dp(96));
+                    pages.get(i).setPadding(0, 0, 0, bottom + dp(92));
                 }
                 return insets;
             }
         });
     }
 
-    @Override
-    protected void onResume() {
-        super.onResume();
-        synced = false;          // 回到设置页时按存储重刷一遍开关
-        // 服务绑好之后，把收到上报时服务还没就绪而暂存的学习结果补推一次
-        try { LearnedProvider.flushToRemote(this); } catch (Throwable ignored) {}
-        refreshSdkRow();
-        statusRefresher.run();
-        // 每次打开设置页都检查一次版本（内部 6 小时节流；点版本行可强制刷新）
-        try { UpdateChecker.check(this, false, updateCb); } catch (Throwable ignored) {}
+    // ── 状态心跳 ────────────────────────────────────────────────────────────
+    // v2.2.0 修复：statusRefresher 此前**只被定义、从未 post**。于是 renderStatus()
+    // 永不执行 —— 顶部三格指标永远停在「—」、状态药丸永远是个空横线，
+    // 而 syncSwitches() 永不执行，所有开关停在构建期 setEnabled(false) 的灰胶囊上。
+    // 这一个心跳同时驱动：指标文案 / 状态药丸 / 开关与真实配置对齐。
+    @Override protected void onStart() {
+        super.onStart();
+        statusHandler.removeCallbacks(statusRefresher);
+        statusHandler.post(statusRefresher);
     }
 
-    @Override
-    protected void onPause() {
-        super.onPause();
+    @Override protected void onStop() {
+        super.onStop();
         statusHandler.removeCallbacks(statusRefresher);
     }
 
-    @Override
-    public void onConfigurationChanged(Configuration config) {
-        super.onConfigurationChanged(config);
-        // Host placeholders may handle uiMode themselves; rebuild our own theme when it changes.
-        if (isDarkMode() != dark) recreate();
+    @Override protected void onDestroy() {
+        statusHandler.removeCallbacksAndMessages(null);
+        super.onDestroy();
+    }
+
+    /** Push the pager down by the measured hero height so the two never overlap. */
+    private void applyHeroInset() {
+        try {
+            ViewGroup.LayoutParams raw = pager.getLayoutParams();
+            if (!(raw instanceof FrameLayout.LayoutParams)) return;
+            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) raw;
+            int want = hero.getHeight() + dp(4);
+            if (lp.topMargin != want) {
+                lp.topMargin = want;
+                pager.setLayoutParams(lp);
+            }
+        } catch (Throwable ignored) {}
+    }
+
+    /** Entrance choreography: hero first, then the tabs, then the live page. */
+    private void animateIn() {
+        UiKit.enter(hero, dp(10), 0L);
+        if (tabBar != null) UiKit.enter(tabBar, dp(8), 70L);
+        if (navPill != null) UiKit.enter(navPill, dp(12), 130L);
+        final View current = pager.pageCount() > 0 ? pager.getChildAt(pager.page()) : null;
+        if (current != null) UiKit.enter(current, dp(14), 40L);
+
+        // Safety net: whatever happens above (cancelled animation, a mid-flight
+        // relayout), make sure the page is visible shortly after.
+        overlay.postDelayed(new Runnable() {
+            @Override public void run() {
+                UiKit.reveal(hero);
+                UiKit.reveal(tabBar);
+                if (current != null) UiKit.reveal(current);
+            }
+        }, 900L);
     }
 
     private boolean isDarkMode() {
@@ -250,50 +355,105 @@ public final class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- 背景光斑
 
-    private void addBlobs(FrameLayout page) {
-        int[] c = blobColors();
-        page.addView(blob(c[0], dp(380), dp(-100), dp(-90), 0, 0));
-        page.addView(blob(c[1], dp(300), 0, dp(150), dp(-80), 0));
-        page.addView(blob(c[2], dp(360), 0, 0, dp(-70), dp(120)));
+    /**
+     * Decorative bloom behind everything.
+     *
+     * Previous build added giant radial {@code View}s as a weighted band, which stole
+     * half the screen and rendered as one enormous disc. Blooms now paint into a single
+     * custom Drawable set as the WINDOW background, so they are truly behind the content
+     * and cannot intercept touches or consume layout space.
+     */
+    /**
+     * Decorative bloom behind everything.
+     *
+     * First attempt painted three huge radial gradients as the window background with
+     * radii up to 0.62 of the screen diagonal; on a 1080x2400 panel that read as one
+     * enormous green disc bleeding through the whole UI. Two lessons applied here:
+     *   - the base colour is fully opaque first, so the blooms only tint, never flood;
+     *   - alpha stays low (the caller passes faint ARGB) and radii are much smaller,
+     *     confined to the top and bottom corners like a real background wash.
+     */
+    private void applyWindowBloom() {
+        try {
+            getWindow().setBackgroundDrawable(new BloomDrawable(blobColors(), cBg()));
+        } catch (Throwable ignored) {
+            getWindow().setBackgroundDrawable(new ColorDrawable(cBg()));
+        }
     }
 
-    /** 径向渐变光斑；四边 margin 决定位置（可为负让它溢出屏幕） */
-    private View blob(int color, int size, int ml, int mt, int mr, int mb) {
-        View v = new View(this);
-        GradientDrawable g = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[]{color, color & 0x00FFFFFF});
-        g.setGradientType(GradientDrawable.RADIAL_GRADIENT);
-        g.setGradientRadius(size / 2f);
-        g.setShape(GradientDrawable.OVAL);
-        v.setBackground(g);
-        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(size, size);
-        lp.setMargins(ml, mt, mr, mb);
-        v.setLayoutParams(lp);
-        return v;
+    /** Faint radial washes in the corners; never affects layout and never intercepts input. */
+    private static final class BloomDrawable extends android.graphics.drawable.Drawable {
+        private final android.graphics.Paint paint =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final int[] colors;
+        private final int base;
+        private final float[] cx = {0.05f, 0.95f, 0.50f};
+        private final float[] cy = {0.02f, 0.20f, 1.00f};
+        private final float[] rr = {0.34f, 0.26f, 0.30f};
+
+        BloomDrawable(int[] colors, int base) {
+            this.colors = colors;
+            this.base = base;
+        }
+
+        private final android.graphics.Shader[] shaders =
+                new android.graphics.Shader[cx.length];
+        private int cachedW = -1, cachedH = -1, cachedLeft = Integer.MIN_VALUE,
+                cachedTop = Integer.MIN_VALUE;
+
+        @Override public void draw(android.graphics.Canvas canvas) {
+            android.graphics.Rect b = getBounds();
+            if (b.isEmpty()) return;
+            // Opaque base first: blooms are a tint over it, not the colour itself.
+            canvas.drawColor(base);
+            float w = b.width(), h = b.height();
+            float max = Math.max(w, h);
+            // The window background keeps the same bounds for the whole session, so the
+            // three radial shaders are built once instead of on every draw() pass -- the
+            // old version allocated a fresh RadialGradient per bloom per frame.
+            if (shaders[0] == null || w != cachedW || h != cachedH
+                    || b.left != cachedLeft || b.top != cachedTop) {
+                cachedW = (int) w;
+                cachedH = (int) h;
+                cachedLeft = b.left;
+                cachedTop = b.top;
+                for (int i = 0; i < colors.length && i < cx.length; i++) {
+                    float x = b.left + w * cx[i];
+                    float y = b.top + h * cy[i];
+                    // Clamp radius hard: nothing bigger than a third of the screen.
+                    float radius = Math.min(max * rr[i], max * 0.34f);
+                    int solid = colors[i];
+                    int clear = solid & 0x00FFFFFF;
+                    shaders[i] = new android.graphics.RadialGradient(
+                            x, y, radius, solid, clear, android.graphics.Shader.TileMode.CLAMP);
+                }
+            }
+            for (int i = 0; i < shaders.length && i < cx.length; i++) {
+                if (shaders[i] == null) continue;
+                paint.setShader(shaders[i]);
+                float x = b.left + w * cx[i];
+                float y = b.top + h * cy[i];
+                float radius = Math.min(max * rr[i], max * 0.34f);
+                canvas.drawCircle(x, y, radius, paint);
+            }
+            paint.setShader(null);
+        }
+
+        @Override public void setAlpha(int alpha) { }
+        @Override public void setColorFilter(android.graphics.ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return android.graphics.PixelFormat.OPAQUE; }
     }
 
     // ---------------------------------------------------------------- 玻璃材质
 
-    /** 玻璃面板：底层渐变高光 rim + 内层半透明体，双层圆角模拟玻璃厚度 */
+    /** 玻璃面板：底层高光 rim + 内层半透明体，双层圆角模拟玻璃厚度 */
     private Drawable glass(float radiusDp) {
-        GradientDrawable rim = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
-                new int[]{cRimHi(), cRimLo()});
-        rim.setCornerRadius(dp(radiusDp));
-        GradientDrawable body = new GradientDrawable();
-        body.setColor(cGlass());
-        body.setCornerRadius(dp(radiusDp));
-        LayerDrawable ld = new LayerDrawable(new Drawable[]{rim, body});
-        int inset = Math.max(1, dp(1));
-        ld.setLayerInset(1, inset, inset, inset, inset);
-        return ld;
+        return UiKit.glass(cGlass(), cRimHi(), cRimLo(), dp(radiusDp), Math.max(1, dp(1)));
     }
 
+    /** 旧签名保留：直接委托给 UiKit，保证已有调用点仍可编译 */
     private Drawable ripple(Drawable content, float radiusDp) {
-        GradientDrawable mask = new GradientDrawable();
-        mask.setShape(GradientDrawable.RECTANGLE);
-        mask.setCornerRadius(dp(radiusDp));
-        mask.setColor(0xFF000000);
-        return new RippleDrawable(ColorStateList.valueOf(cRipple()), content, mask);
+        return UiKit.ripple(cRipple(), content, dp(radiusDp));
     }
 
     private GradientDrawable capsule(int color) {
@@ -305,21 +465,13 @@ public final class MainActivity extends Activity {
         return g;
     }
 
-    private Switch makeSwitch() {
-        Switch sw = new Switch(this);
-        sw.setShowText(false);
-        sw.setSwitchMinWidth(dp(46));
-        StateListDrawable track = new StateListDrawable();
-        track.addState(new int[]{android.R.attr.state_checked}, capsule(cAccent()));
-        track.addState(new int[]{}, capsule(cTrackOff()));
-        GradientDrawable thumb = new GradientDrawable();
-        thumb.setShape(GradientDrawable.OVAL);
-        thumb.setColor(0xFFFFFFFF);
-        thumb.setSize(dp(22), dp(22));
-        thumb.setStroke(Math.max(1, dp(1)), 0x1A000000);
-        sw.setTrackDrawable(track);
-        sw.setThumbDrawable(thumb);
-        sw.setAlpha(0.4f);   // 服务绑定前半透明，syncSwitches() 放开
+    /** 自绘胶囊开关：轨道染青、thumb 带骨至挤压，抛出带弹道感 */
+    private GlassSwitch makeSwitch() {
+        GlassSwitch sw = new GlassSwitch(this);
+        sw.setTrackColors(cTrackOff(), cAccent());
+        sw.setThumbColors(0xFFFFFFFF, 0xFFFFFFFF);
+        // 不再用 setAlpha 假装「未就绪」：开关从第一帧起就画真实状态、并且可点。
+        // 服务未绑定时点击会走写入失败分支给出 Toast，而不是变成一颗点不动的灰胶囊。
         return sw;
     }
 
@@ -493,40 +645,99 @@ public final class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- 区块构建
 
-    private void buildHero(LinearLayout root) {
-        TextView title = text("MapAdKiller", 26, Typeface.BOLD, cTxP());
-        title.setPadding(dp(4), dp(16), 0, dp(2));
-        root.addView(title);
+    private void buildHero(LinearLayout host) {
+        // ── 玻璃状态卡：标题 + 右侧状态药丸 + 实时指标条 ──────────────────
+        // Old build stacked five full-width text rows (740 px of a 2276 px screen) and
+        // let the "verified versions" line wrap onto three lines. Everything that can be
+        // a compact pill is one now, and the long version string is collapsed behind tap.
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setBackground(glass(24));
+        card.setPadding(dp(18), dp(16), dp(18), dp(14));
+        card.setElevation(0);
+        UiKit.clipRounded(card, dp(24));
 
-        statusView = text("", 13, Typeface.NORMAL, cTxS());
-        statusView.setPadding(dp(4), 0, 0, dp(6));
-        root.addView(statusView);
-        renderStatus();
+        // 首行：标题 与 状态药丸
+        LinearLayout titleRow = new LinearLayout(this);
+        titleRow.setOrientation(LinearLayout.HORIZONTAL);
+        titleRow.setGravity(Gravity.CENTER_VERTICAL);
 
-        // 版本行：绿=已是最新 / 黄=有新版本 / 灰=未获取（点一下强制刷新）
-        verLine = text("", 13, Typeface.BOLD, cTxS());
-        verLine.setPadding(dp(4), 0, 0, dp(2));
+        TextView title = text("MapAdKiller", 21, Typeface.BOLD, cTxP());
+        titleRow.addView(title, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        navPill = new LinearLayout(this);
+        navPill.setOrientation(LinearLayout.HORIZONTAL);
+        navPill.setGravity(Gravity.CENTER_VERTICAL);
+        navPill.setPadding(dp(11), dp(6), dp(13), dp(6));
+        navPill.setBackground(UiKit.ripple(cRipple(), UiKit.plate(pillBg(), dp(999)), dp(999)));
+        navPill.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showStatusDetail(); }
+        });
+        UiKit.pressable(navPill, 0.94f);
+        // Exact pixel size: WRAP_CONTENT on a bare View with only a GradientDrawable
+        // resolves to nothing, so the drawable expands and floods the parent. That is
+        // exactly how a 7dp status dot once rendered as a full-screen green disc.
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(dp(7), dp(7));
+        dotLp.rightMargin = dp(6);
+        dotLp.gravity = Gravity.CENTER_VERTICAL;
+        navPill.addView(dot(cDotOk(), 7), dotLp);
+        statusPillText = text("—", 12, Typeface.BOLD, cTxP());
+        navPill.addView(statusPillText);
+        titleRow.addView(navPill, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        card.addView(titleRow);
+
+        // 副标题一行：作用域摘要（过长时省略，详情进弹层）
+        statusView = text("", 12, Typeface.NORMAL, cTxS());
+        statusView.setSingleLine(true);
+        statusView.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams slp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        slp.topMargin = dp(6);
+        card.addView(statusView, slp);
+
+        // 指标条：三个等宽小格子（版本 / 作用域 / 广告 SDK）
+        metricRow = new LinearLayout(this);
+        metricRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.topMargin = dp(14);
+        card.addView(metricRow, mlp);
+        buildMetrics();
+
+        host.addView(card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 版本提示行（放在卡片下方，单行、可点）
+        verLine = text("", 12, Typeface.BOLD, cTxS());
+        verLine.setPadding(dp(6), dp(10), dp(6), 0);
+        verLine.setSingleLine(true);
+        verLine.setEllipsize(android.text.TextUtils.TruncateAt.END);
         verLine.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 Toast.makeText(MainActivity.this, "正在检查更新…", Toast.LENGTH_SHORT).show();
                 UpdateChecker.check(MainActivity.this, true, updateCb);
             }
         });
-        root.addView(verLine);
+        host.addView(verLine, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        // 最佳适配应用版本（本机实际安装版本并排对照）
-        adLine = text("", 12, Typeface.NORMAL, cTxS());
+        adLine = text("", 11, Typeface.NORMAL, cTxS());
         adLine.setLineSpacing(0, 1.2f);
-        adLine.setPadding(dp(4), 0, 0, dp(10));
-        root.addView(adLine);
+        adLine.setPadding(dp(6), dp(4), dp(6), dp(2));
+        adLine.setVisibility(View.GONE);        // 详细适配信息收进弹层，不再撑高首页
+        host.addView(adLine);
 
-        updateBtn = text("检查版本更新", 14, Typeface.BOLD, 0xFFFFFFFF);
+        updateBtn = text("检查版本更新", 13, Typeface.BOLD, 0xFFFFFFFF);
         updateBtn.setGravity(Gravity.CENTER);
-        updateBtn.setPadding(dp(14), dp(10), dp(14), dp(10));
+        updateBtn.setPadding(dp(14), dp(11), dp(14), dp(11));
         LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        blp.topMargin = dp(8);
-        updateBtn.setBackground(capsuleBg(cAccent(), HEAD_R));
+        blp.topMargin = dp(12);
+        updateBtn.setBackground(UiKit.ripple(cRipple(), UiKit.gradient(
+                cAccentTop(), cAccentBottom(), dp(16)), dp(16)));
         updateBtn.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 if (UpdateChecker.isOutdated(MainActivity.this)) {
@@ -537,10 +748,116 @@ public final class MainActivity extends Activity {
                 UpdateChecker.check(MainActivity.this, true, updateCb);
             }
         });
-        root.addView(updateBtn, blp);
+        UiKit.pressable(updateBtn, 0.97f);
+        host.addView(updateBtn, blp);
 
         renderVersionLines();
     }
+
+    private TextView statusPillText;
+
+    /** 三格实时指标（等宽，各自可点） */
+    private void buildMetrics() {
+        if (metricRow == null) return;
+        metricRow.removeAllViews();
+        metricRow.addView(metric("版本", versionMetric, new Runnable() {
+            @Override public void run() { verLine.performClick(); }
+        }), metricLp(0));
+        metricRow.addView(metric("作用域", scopeMetric, new Runnable() {
+            @Override public void run() { showStatusDetail(); }
+        }), metricLp(1));
+        metricRow.addView(metric("广告 SDK", sdkMetric, new Runnable() {
+            @Override public void run() { showLearnedSdks(); }
+        }), metricLp(2));
+    }
+
+    private LinearLayout.LayoutParams metricLp(int index) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        if (index > 0) lp.leftMargin = dp(8);
+        return lp;
+    }
+
+    private String versionMetric = "—";
+    private String scopeMetric = "—";
+    private String sdkMetric = "—";
+    /** 作用域那一格的配色（绿=已勾选 / 红=未勾选 / 灰=读不到）。 */
+    private int scopeMetricColor = 0xFF7A8290;
+    /** 已捕获 SDK 数量的短缓存：心跳里不必每次都重建 + 排序整张清单。 */
+    private int sdkCacheCount = -1;
+    private long sdkCacheAt;
+
+    /** 单格指标：值 + 标签，两行，玻璃底 */
+    private View metric(String label, String value, final Runnable action) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(dp(11), dp(9), dp(11), dp(9));
+        box.setBackground(UiKit.ripple(cRipple(), UiKit.plate(metricBg(), dp(13)), dp(13)));
+        box.setContentDescription(label + " " + value);
+        box.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { if (action != null) action.run(); }
+        });
+        UiKit.pressable(box, 0.96f);
+        TextView v = text(value, 14, Typeface.BOLD, cTxP());
+        v.setSingleLine(true);
+        v.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        box.addView(v);
+        TextView l = text(label, 10, Typeface.NORMAL, cTxS());
+        l.setPadding(0, dp(2), 0, 0);
+        box.addView(l);
+        box.setTag(v);
+        return box;
+    }
+
+    /** 刷新三格指标文案 + 配色 */
+    private void refreshMetrics() {
+        if (metricRow == null) return;
+        versionMetric = "v" + Version.NAME;
+        int sdk = sdkCount();
+        sdkMetric = String.valueOf(sdk);
+        for (int i = 0; i < metricRow.getChildCount(); i++) {
+            View box = metricRow.getChildAt(i);
+            Object tag = box.getTag();
+            if (!(tag instanceof TextView)) continue;
+            TextView tv = (TextView) tag;
+            String value = i == 0 ? versionMetric : i == 1 ? scopeMetric : sdkMetric;
+            // 三格各自配色：版本=强调色、作用域=绿/红/灰、SDK=有捕获才点亮。
+            int color = i == 0 ? cAccent()
+                    : i == 1 ? scopeMetricColor
+                    : (sdk > 0 ? cAccent() : cTxS());
+            if (!value.contentEquals(tv.getText())) tv.setText(value);
+            tv.setTextColor(color);
+            box.setContentDescription((i == 0 ? "版本 " : i == 1 ? "作用域 " : "广告 SDK ") + value);
+        }
+    }
+
+    /** SDK 计数（1.5s 短缓存）：learnedListForApp() 会走服务读 + 排序，不该每拍都跑。 */
+    private int sdkCount() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (sdkCacheCount >= 0 && now - sdkCacheAt < 1500L) return sdkCacheCount;
+        int n = 0;
+        try { n = SdkAutoBlock.learnedListForApp().size(); } catch (Throwable ignored) {}
+        sdkCacheCount = n;
+        sdkCacheAt = now;
+        return n;
+    }
+
+    private int pillBg()  { return dark ? 0x1FFFFFFF : 0x14FFFFFF; }
+    private int metricBg(){ return dark ? 0x14FFFFFF : 0x0D000000; }
+    private int cAccentTop()    { return dark ? 0xFF4C8DFF : 0xFF3D82FF; }
+    private int cAccentBottom() { return dark ? 0xFF2563EB : 0xFF0A5CE0; }
+
+    /** 小圆点指示器（尺寸由调用方的 LayoutParams 决定，避免 WRAP_CONTENT 无限拉伸） */
+    private View dot(int color, int sizeDp) {
+        View v = new View(this);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        v.setBackground(g);
+        return v;
+    }
+
+
 
     /** 去广告卡片：始终开启、不折叠，作为页面第一块「仪表盘」 */
     private void buildForcedCard(LinearLayout root) {
@@ -556,12 +873,19 @@ public final class MainActivity extends Activity {
         root.addView(card, cardLp());
     }
 
-    private final List<Sec> secs = new ArrayList<>();
+    /**
+     * 当前正在构建/正在被搜索的那一页的抽屉组。
+     *
+     * <p>不是 final：四页各建一次，每次换一块。正因为 {@link #secs} 只指当前页，
+     * 搜索时遍历它才不会把另外三页的抽屉一起展开 —— 那会让 pager 里的每一页都被改坏。
+     */
+    private List<Sec> secs = new ArrayList<Sec>();
 
     private static final class Sec {
         LinearLayout group;
         LinearLayout card;
         TextView chev;
+        View bar;
         boolean expanded;
     }
 
@@ -575,15 +899,30 @@ public final class MainActivity extends Activity {
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setPadding(dp(16), dp(12), dp(12), dp(12));
-        head.setBackground(ripple(glass(HEAD_R), HEAD_R));
+        head.setMinimumHeight(dp(56));
+        head.setPadding(dp(16), dp(13), dp(14), dp(13));
+        head.setBackground(UiKit.ripple(cRipple(), glass(16), 16f));
+        head.setElevation(0);
+        UiKit.clipRounded(head, dp(16));
+        UiKit.pressable(head, 0.985f);
+
+        // 左侧色条：展开时点亮，给折叠状态一个视觉锤点
+        s.bar = new View(this);
+        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(3), dp(18));
+        barLp.rightMargin = dp(11);
+        s.bar.setBackground(UiKit.plate(cAccent(), dp(2)));
+        s.bar.setAlpha(0.25f);
+        head.addView(s.bar, barLp);
+
         TextView t = text(title, 14, Typeface.BOLD, cTxP());
         head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        s.chev = text("›", 18, Typeface.BOLD, cTxS());
+
+        s.chev = text("›", 17, Typeface.BOLD, cTxS());
         s.chev.setGravity(Gravity.CENTER);
         s.chev.setPadding(dp(6), 0, dp(6), 0);
         head.addView(s.chev, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
         head.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { toggle(s); }
         });
@@ -592,34 +931,117 @@ public final class MainActivity extends Activity {
 
         s.card = newCard();
         s.card.setVisibility(View.GONE);
-        s.card.setAlpha(0f);
         LinearLayout.LayoutParams clp = cardLp();
         clp.topMargin = dp(8);
         s.group.addView(s.card, clp);
 
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        glp.topMargin = dp(10);
+        glp.topMargin = dp(9);
         list.addView(s.group, glp);
         secs.add(s);
         return s;
     }
 
+    /**
+     * Expand / collapse a drawer.
+     *
+     * The old build toggled visibility and faded a fixed-height card, so the rows below
+     * teleported. Here the card's measured height is animated from 0 to its real size
+     * while alpha and a small drift ride along, so the list opens like a drawer instead
+     * of snapping. The chevron rotates with a spring so the tap feels acknowledged.
+     */
     private void toggle(final Sec s) {
         final boolean expand = !s.expanded;
         s.expanded = expand;
-        s.chev.animate().rotation(expand ? 90f : 0f).setDuration(190).start();
+        // 抽屉高度本身就是逐帧动画；再叠一层 LayoutTransition.CHANGING 会在同一帧里
+        // 把整列重新测量两遍（实测展开一次刷了 1300+ 帧）。动画期间先把它摘掉，
+        // 结束后再装回去，保证其它布局变化仍然有平滑过渡。
+        final ViewGroup host = s.group.getParent() instanceof ViewGroup
+                ? (ViewGroup) s.group.getParent() : null;
+        final android.animation.LayoutTransition saved =
+                host == null ? null : host.getLayoutTransition();
+        if (host != null && saved != null) host.setLayoutTransition(null);
+        final Runnable restore = new Runnable() {
+            @Override public void run() {
+                if (host != null && saved != null) host.setLayoutTransition(saved);
+            }
+        };
+        s.chev.animate().cancel();
+        s.chev.animate().rotation(expand ? 90f : 0f)
+                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
+        if (s.bar != null) {
+            s.bar.animate().cancel();
+            s.bar.animate().alpha(expand ? 1f : 0.25f)
+                    .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
+        }
+
         if (expand) {
             s.card.setVisibility(View.VISIBLE);
-            s.card.setTranslationY(-dp(5));
-            s.card.animate().alpha(1f).translationY(0f).setDuration(200).start();
+            s.card.getLayoutParams().height = 0;
+            s.card.setAlpha(0f);
+            s.card.requestLayout();
+            s.card.post(new Runnable() {
+                @Override public void run() {
+                    final int target = measureCard(s.card);
+                    if (target <= 0) { revealNow(s); restore.run(); return; }
+                    UiKit.animateInt(0, target, UiKit.DECELERATE, UiKit.DUR_SLOW,
+                            new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                                @Override public void onAnimationUpdate(
+                                        android.animation.ValueAnimator a) {
+                                    if (!s.expanded) return;
+                                    int h = (Integer) a.getAnimatedValue();
+                                    s.card.getLayoutParams().height = h;
+                                    s.card.requestLayout();
+                                    s.card.setAlpha(Math.min(1f, h / (float) target));
+                                }
+                            });
+                    s.card.postDelayed(restore, UiKit.DUR_SLOW + 60L);
+                }
+            });
         } else {
-            s.card.animate().alpha(0f).translationY(-dp(5)).setDuration(160)
-                    .withEndAction(new Runnable() {
-                        @Override public void run() {
-                            if (!s.expanded) s.card.setVisibility(View.GONE);
+            final int from = s.card.getHeight();
+            UiKit.animateInt(from, 0, UiKit.ACCELERATE, UiKit.DUR_BASE,
+                    new android.animation.ValueAnimator.AnimatorUpdateListener() {
+                        @Override public void onAnimationUpdate(android.animation.ValueAnimator a) {
+                            if (s.expanded) return;
+                            int h = (Integer) a.getAnimatedValue();
+                            s.card.getLayoutParams().height = h;
+                            s.card.requestLayout();
+                            s.card.setAlpha(from <= 0 ? 0f : Math.min(1f, h / (float) from));
                         }
-                    }).start();
+                    });
+            s.card.postDelayed(new Runnable() {
+                @Override public void run() {
+                    if (s.expanded) return;
+                    s.card.setVisibility(View.GONE);
+                    s.card.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
+                    s.card.requestLayout();
+                }
+            }, UiKit.DUR_BASE + 20L);
+            s.card.postDelayed(restore, UiKit.DUR_BASE + 60L);
+        }
+    }
+
+    private void revealNow(Sec s) {
+        s.card.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        s.card.requestLayout();
+        s.card.setAlpha(0f);
+        s.card.animate().alpha(1f).setDuration(UiKit.DUR_BASE)
+                .setInterpolator(UiKit.DECELERATE).start();
+    }
+
+    /** Measure a card at wrap_content without disturbing its current layout. */
+    private int measureCard(View card) {
+        try {
+            int width = card.getWidth();
+            if (width <= 0) width = overlay == null ? 0 : overlay.getWidth() - dp(32);
+            if (width <= 0) return 0;
+            card.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
+                    View.MeasureSpec.makeMeasureSpec(0, View.MeasureSpec.UNSPECIFIED));
+            return card.getMeasuredHeight();
+        } catch (Throwable t) {
+            return 0;
         }
     }
 
@@ -630,8 +1052,9 @@ public final class MainActivity extends Activity {
         for (String tab : Config.TABS) addSwitch(sec.card, "显示标签「" + tab + "」", Config.K_TAB_PREFIX + tab);
 
         sec = newDrawer("高德 · 地图标注");
-        addNoteRow(sec.card, "统一控制酒店、景点、门店等兴趣点的图标和名称。道路、街道、城市及地图地名保留。修改后彻底关闭并重新打开高德生效。");
-        addSwitch(sec.card, "显示地图兴趣点图标和名称", Config.K_MAP_POI);
+        addNoteRow(sec.card, "统一控制地图上的文字标注：兴趣点图标、店名、道路名与城市名。"
+                + "路网、水域与地形照常显示。修改后彻底关闭并重新打开高德生效。");
+        addSwitch(sec.card, "显示地图标注", Config.K_MAP_POI);
 
         sec = newDrawer("高德 · 首页工具宫格");
         addNoteRow(sec.card, "按固定工具 ID 控制显示。关闭全部首页推荐时采用原生工具数据构建等宽宫格，自动补位；图标与点击动作同步保留。");
@@ -682,6 +1105,31 @@ public final class MainActivity extends Activity {
         addSwitch(sec.card, "好友动态", Config.K_MY_FRIENDS);
         addNoteRow(sec.card, "按 Mine 卡片类型与入口行数据处理。搜索页运营卡、资质页及其他未完成协议适配的区域暂不提供开关。");
         // 「其他 · 入口与调试」一组已挪到第 3 页（其他），见 buildOtherPage()
+
+        // ── 高德 · 省电 / 后台（v2.2.2 新增）──────────────────────────────────────
+        // 这批键以前只注册进了悬浮面板，模块版设置页一条都没有 —— 用户因此说「模块里没有
+        // 省电开关」。label 一律写成「关闭…」：这些键的 true 表示「该行为已被拦截」，
+        // 而 readState() 走 Config.defaultVisible 兜底 true ⇒ 默认显示为开。
+        //
+        // 刻意**不注册** labels_on：它是"启用第三方标注过滤"（反义，消费方用
+        // Config.selected 严格读、默认 false），混进这一组会让「开 = 已拦截」的读法出错。
+        sec = newDrawer("高德 · 省电 / 后台");
+        addNoteRow(sec.card, "开 = 该行为已被拦截（默认全开）；关 = 恢复高德原生行为。"
+                + "关掉推送长连接后，行程提醒 / 消息 / 家人地图会恢复，但 ACCS 长连接会重新占用 CPU。");
+        addSwitch(sec.card, "关闭推送长连接（ACCS，省电最多）", Config.K_PUSH_HARD_OFF);
+        addNoteRow(sec.card, "关掉后高德推送（行程提醒 / 活动 / 消息 / 家人地图）会恢复，"
+                + "但 ACCS 长连接会重新占用 CPU。");
+        addSwitch(sec.card, "关闭推送消息处理", Config.K_PUSH_OFF);
+        addSwitch(sec.card, "关闭推送服务壳（激进）", Config.K_PUSH_KILL_OFF);
+        addSwitch(sec.card, "关闭周期任务（WorkManager / JobScheduler）", Config.K_SUBPROC_JOB_OFF);
+        addNoteRow(sec.card, "关掉后高德的周期后台任务会恢复（更耗电）。");
+        addSwitch(sec.card, "关闭桌面小组件刷新", Config.K_SUBPROC_WIDGET_OFF);
+        addSwitch(sec.card, "关闭云控调度池（LotusPool）", Config.K_SUBPROC_LOTUSPOOL_OFF);
+        addSwitch(sec.card, "关闭阿里埋点 Analytics", Config.K_TRACK_OFF);
+        addSwitch(sec.card, "关闭开屏广告请求", Config.K_ALIMAMA_SPLASH_OFF);
+        addSwitch(sec.card, "关闭广告曝光上报", Config.K_ALIMAMA_LOG_OFF);
+        addSwitch(sec.card, "关闭子进程拦截（总闸，排查用）", Config.K_SUBPROC_OFF);
+        addNoteRow(sec.card, "一次性放行所有子进程拦截；怀疑某功能被误伤时先关这个。");
     }
 
     // ══════════════════════════════════════════════ v2.0.0 分页（百度 / 高德 / 其他）
@@ -723,7 +1171,11 @@ public final class MainActivity extends Activity {
         LinearLayout mount = newMount();
         root.addView(mount);
         LinearLayout old = list;
+        final List<Sec> pageSecs = new ArrayList<Sec>();
+        secs = pageSecs;
         list = mount;
+        expandSnapshot.clear();
+        registerPageTarget(PAGE_BAIDU, pageSecs);
         try {
             io.github.ldxm666.bmapclean.Spec.Cat[] cats = io.github.ldxm666.bmapclean.Spec.cats();
             for (int i = 0; i < cats.length; i++) {
@@ -753,7 +1205,10 @@ public final class MainActivity extends Activity {
         LinearLayout mount = newMount();
         root.addView(mount);
         LinearLayout old = list;
+        final List<Sec> pageSecs = new ArrayList<Sec>();
+        secs = pageSecs;
         list = mount;
+        registerPageTarget(PAGE_AMAP, pageSecs);
         try {
             buildDrawers();
         } finally {
@@ -763,7 +1218,86 @@ public final class MainActivity extends Activity {
         return sv;
     }
 
-    /** 页 2：其他 / 调试 */
+    /**
+     * 给一页装上搜索 Target。
+     *
+     * <p>在页面构建<b>之前</b>调用：{@link SwitchFinder#register} 会重建该页索引，
+     * 而索引是由开关工厂在随后的建行过程中一条条填进去的。
+     *
+     * <p>{@code pageSecs} 必须显式传进来：四页共用同一个 Activity，搜索真正发生时
+     * {@link #secs} 早已指向最后构建的那一页。捕获当页自己的那份列表，
+     * 搜索才碰不到别的页的抽屉。
+     */
+    private void registerPageTarget(final int page, final List<Sec> pageSecs) {
+        if (finder == null) return;
+        finder.register(page, new SwitchFinder.Target() {
+            @Override public boolean applyQuery(String query) {
+                List<Sec> saved = secs;
+                secs = pageSecs;
+                try {
+                    boolean any = applyQueryOnPage(page, query);
+                    applySearch(true);
+                    return any;
+                } finally {
+                    secs = saved;
+                }
+            }
+            @Override public void resetQuery() {
+                List<Sec> saved = secs;
+                secs = pageSecs;
+                try {
+                    applySearch(false);
+                    // 还原之后把每张卡片的行全部放出来，只显示命中项交由下次进入搜索时重算。
+                    for (int i = 0; i < secs.size(); i++) {
+                        Sec s = secs.get(i);
+                        if (s == null || s.card == null) continue;
+                        s.group.setVisibility(View.VISIBLE);
+                        filterRows(s.card, "");
+                    }
+                } finally {
+                    secs = saved;
+                }
+            }
+        });
+    }
+
+    /** 页 2：腾讯地图 —— 分类来自 io.github.ldxm666.tmapclean.Spec（开关写 tmapclean_config） */
+    private ScrollView buildTmapPage() {
+        ScrollView sv = newPage();
+        LinearLayout root = pageRoot(sv);
+        addTmapInfoCard(root);
+        LinearLayout mount = newMount();
+        root.addView(mount);
+        LinearLayout old = list;
+        final List<Sec> pageSecs = new ArrayList<Sec>();
+        secs = pageSecs;
+        list = mount;
+        registerPageTarget(PAGE_TMAP, pageSecs);
+        try {
+            // 工具目录由 hook 侧从腾讯地图进程里学回来；进本页时先同步一次。
+            io.github.ldxm666.mapclean.TmapPanel.syncLearnedTools();
+            io.github.ldxm666.tmapclean.Spec.Cat[] cats = io.github.ldxm666.tmapclean.Spec.cats();
+            for (int i = 0; i < cats.length; i++) {
+                final io.github.ldxm666.tmapclean.Spec.Cat cat = cats[i];
+                Sec sec = newDrawer(cat.title);
+                if (cat.subtitle != null && cat.subtitle.length() > 0) addNoteRow(sec.card, cat.subtitle);
+                for (int j = 0; j < cat.rows.length; j++) {
+                    io.github.ldxm666.tmapclean.Spec.Row row = cat.rows[j];
+                    if (row.key == null) addNoteRow(sec.card, row.title);
+                    else addTmapSwitch(sec.card, row.title, row.key, row.note);
+                }
+                if (i == 0) toggle(sec);        // 第一组默认展开
+            }
+        } finally {
+            list = old;
+        }
+        addVersionFooter(root, "适配腾讯地图 11.7.0。底栏 / 工具宫格 / 设置家在重新进入首页时生效；"
+                + "「我的」页与「大家都在看」在重新进入对应页面时生效。"
+                + "工具逐项开关需要先打开一次腾讯地图首页（模块会在真实进程里学到工具目录）。");
+        return sv;
+    }
+
+    /** 页 3：其他 / 调试 */
     private ScrollView buildOtherPage() {
         ScrollView sv = newPage();
         LinearLayout root = pageRoot(sv);
@@ -797,13 +1331,13 @@ public final class MainActivity extends Activity {
     }
 
     private void addTab(String label) {
+        if (tabBar == null) return;
         final TextView chip = text(label, 13, Typeface.BOLD, cTxS());
         chip.setGravity(Gravity.CENTER);
-        chip.setPadding(dp(14), dp(9), dp(14), dp(9));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(dark ? 0x1FFFFFFF : 0x22FFFFFF);
-        bg.setCornerRadius(dp(HEAD_R));
-        chip.setBackground(ripple(bg, HEAD_R));
+        chip.setPadding(dp(10), dp(10), dp(10), dp(10));
+        chip.setBackground(UiKit.rippleBare(cRipple(), dp(14)));
+        chip.setClickable(true);
+        UiKit.pressable(chip, 0.95f);
         chip.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 int i = tabChips.indexOf(v);
@@ -812,18 +1346,140 @@ public final class MainActivity extends Activity {
         });
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
                 0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
-        lp.rightMargin = dp(8);
+        lp.rightMargin = dp(6);
         tabChips.add(chip);
         tabBar.addView(chip, lp);
     }
 
     private void selectTab(int index) {
-        for (int i = 0; i < tabChips.size(); i++) {
-            TextView c = tabChips.get(i);
-            boolean on = (i == index);
-            c.setTextColor(on ? cAccent() : cTxS());
-            c.setAlpha(on ? 1f : 0.7f);
+        if (tabBar == null) return;
+        // 每页可搜的范围不同（“其他”页几乎没有），切页时同步决定搜索条去留。
+        if (finder != null) {
+            finder.dismissKeyboard();
+            finder.attach(index);
         }
+        for (int i = 0; i < tabChips.size(); i++) {
+            final TextView c = tabChips.get(i);
+            final boolean on = (i == index);
+            // 段控样式：选中=染色胶囊 + 强调色文字；未选中=主文字色 + 0.72 不透明。
+            // 之前未选中用 0.62 + 灰色文字，小屏上糊成一片“全是灰按钮”。
+            c.setTextColor(on ? cAccent() : cTxP());
+            c.setTypeface(Typeface.DEFAULT_BOLD, on ? Typeface.BOLD : Typeface.NORMAL);
+            c.animate().cancel();
+            c.animate().alpha(on ? 1f : 0.72f)
+                    .setDuration(UiKit.DUR_BASE)
+                    .setInterpolator(UiKit.SPRING).start();
+            c.setBackground(on
+                    ? UiKit.ripple(cRipple(), UiKit.plate(tabOnBg(), dp(14)), dp(14))
+                    : UiKit.rippleBare(cRipple(), dp(14)));
+        }
+    }
+
+    private int tabOnBg() { return dark ? 0x2E7AB1FF : 0x1F0A6CF5; }
+
+    // ── 搜索：每页的查询落地 ──────────────────────────────────────────────
+
+    /**
+     * 进入/退出搜索时统一展开或还原抽屉，并把不相关的开关行收起来。
+     *
+     * <p>为什么必须展开：开关都放在默认折叠的抽屉里，用户搜“步行”却看到
+     * “高德 · 首页推荐内容”的折叠头，等于什么都没发生。
+     * 退出搜索时按 {@link #expandSnapshot} 还原，不让一次搜索永久改变用户的展开偏好。
+     *
+     * @param searching true = 展开全部 + 只留命中；false = 还原
+     */
+    private void applySearch(boolean searching) {
+        for (int i = 0; i < secs.size(); i++) {
+            Sec s = secs.get(i);
+            if (s == null || s.card == null) continue;
+            if (searching) {
+                if (!expandSnapshot.containsKey(s)) expandSnapshot.put(s, s.expanded);
+                if (!s.expanded) expand(s);
+            } else {
+                Boolean was = expandSnapshot.get(s);
+                if (was != null && was.booleanValue() != s.expanded) {
+                    if (was.booleanValue()) expand(s);
+                    else collapse(s);
+                }
+            }
+            if (!searching) expandSnapshot.remove(s);
+        }
+    }
+
+    private void expand(Sec s) {
+        if (s == null || s.expanded || s.card == null) return;
+        s.expanded = true;
+        s.card.setVisibility(View.VISIBLE);
+        s.card.getLayoutParams().height = ViewGroup.LayoutParams.WRAP_CONTENT;
+        s.card.setAlpha(0f);
+        s.card.requestLayout();
+        s.card.animate().alpha(1f).setDuration(UiKit.DUR_BASE)
+                .setInterpolator(UiKit.DECELERATE).start();
+        if (s.chev != null) s.chev.animate().cancel();
+        if (s.chev != null) s.chev.animate().rotation(90f)
+                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
+        if (s.bar != null) s.bar.animate().alpha(1f)
+                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
+    }
+
+    private void collapse(Sec s) {
+        if (s == null || !s.expanded || s.card == null) return;
+        s.expanded = false;
+        if (s.chev != null) s.chev.animate().cancel();
+        if (s.chev != null) s.chev.animate().rotation(0f)
+                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
+        if (s.bar != null) s.bar.animate().alpha(0.25f)
+                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
+        s.card.animate().alpha(0f).setDuration(UiKit.DUR_BASE)
+                .setInterpolator(UiKit.ACCELERATE)
+                .withEndAction(new Runnable() {
+                    @Override public void run() {
+                        s.card.setVisibility(View.GONE);
+                    }
+                }).start();
+    }
+
+    /**
+     * 一页的查询实现：把该页所有抽屉里的开关行按命中收起/显示。
+     *
+     * <p>行的可见性靠“标题 + 备注 + 配置键”三段匹配（{@link SwitchFinder.Entry#haystack}），
+     * 所以「步行」「walk」「tool_walk」敲法都命中同一个开关。
+     */
+    private boolean applyQueryOnPage(int page, String query) {
+        boolean any = false;
+        for (int i = 0; i < secs.size(); i++) {
+            Sec s = secs.get(i);
+            if (s == null || s.card == null) continue;
+            int shown = filterRows(s.card, query);
+            // 抽屉一个命中都没有时整组收起，避免留一堆空壳标题。
+            if (shown == 0) {
+                s.group.setVisibility(View.GONE);
+            } else {
+                s.group.setVisibility(View.VISIBLE);
+                any = true;
+            }
+        }
+        return any;
+    }
+
+    /** @return 该卡片里被显示出来的开关行数 */
+    private int filterRows(android.view.ViewGroup host, String query) {
+        int shown = 0;
+        for (int i = 0; i < host.getChildCount(); i++) {
+            View child = host.getChildAt(i);
+            if (!(child instanceof android.view.ViewGroup)) continue;
+            android.view.ViewGroup row = (android.view.ViewGroup) child;
+            Object tag = row.getTag(TAG_HAYSTACK);
+            if (!(tag instanceof String)) {
+                // 说明行（左侧细色条那一种）不带开关，跟着同组显隐就行，别动它。
+                continue;
+            }
+            String haystack = ((String) tag).toLowerCase(java.util.Locale.ROOT);
+            boolean hit = query.length() == 0 || haystack.contains(query);
+            row.setVisibility(hit ? View.VISIBLE : View.GONE);
+            if (hit) shown++;
+        }
+        return shown;
     }
 
     /** 百度那一页的信息卡：模块状态 + 最近一次规则执行 + 一键恢复 */
@@ -836,16 +1492,8 @@ public final class MainActivity extends Activity {
         head.setPadding(0, dp(2), 0, dp(8));
         card.addView(head);
 
-        String diag = null;
-        try { diag = io.github.ldxm666.bmapclean.App.diag(); } catch (Throwable ignored) {}
-        int cnt = 0;
-        try { cnt = io.github.ldxm666.bmapclean.App.reportCount(); } catch (Throwable ignored) {}
-        String info = "最近一次规则执行：" + (diag == null ? "尚未收到回报" : diag)
-                + "\n累计回报 " + cnt + " 次";
-        TextView infoView = text(info, 12, Typeface.NORMAL, cTxS());
-        infoView.setLineSpacing(0, 1.25f);
-        card.addView(infoView);
-
+        // 「最近一次规则执行 / 累计回报」那一大片诊断文字已按 LO 要求移除（2026-10-14）：
+        // 用户要的是开关，不是 hook 计数。诊断仍可通过 logcat 看（TAG=BMapClean）。
         TextView reset = text("全部恢复显示（清空百度侧配置）", 13, Typeface.BOLD, cDotBad());
         reset.setPadding(0, dp(14), 0, dp(4));
         reset.setBackground(ripple(capsule(0x12FF6B70), HEAD_R));
@@ -867,38 +1515,97 @@ public final class MainActivity extends Activity {
     }
 
     /** 百度组的开关行（配置 group 与高德不同，写 bmapclean_config） */
+    /** 百度组的开关行（配置 group 与高德不同，写 bmapclean_config） */
     private void addBmapSwitch(final LinearLayout card, String title, final String key, String note) {
-        LinearLayout row = newRow(card);
-        TextView label = text(title, 15, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(12), dp(8), dp(12));
+        LinearLayout row = newSwitchRow(card, key, title, note);
+        TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
+        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setLineSpacing(0, 1.15f);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        final Switch sw = makeSwitch();
+        final GlassSwitch sw = makeSwitch();
+        sw.setLabel(title);
         boolean def = io.github.ldxm666.bmapclean.Spec.defaultVisible(key);
         try {
-            sw.setChecked(io.github.ldxm666.bmapclean.App.read(key, def));
-            sw.setEnabled(io.github.ldxm666.bmapclean.App.connected());
+            sw.setChecked(io.github.ldxm666.bmapclean.App.read(key, def), false);
         } catch (Throwable t) {
-            sw.setChecked(def);
+            sw.setChecked(def, false);
         }
-        sw.setClickable(false);
         bmapSwitches.put(key, sw);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                boolean next = !sw.isChecked();
-                boolean ok = false;
-                try { ok = io.github.ldxm666.bmapclean.App.write(key, next); } catch (Throwable ignored) {}
-                if (ok) {
-                    sw.setChecked(next);
-                } else {
-                    Toast.makeText(MainActivity.this, "LSPosed 服务未连接，请稍后重试", Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
+        index(finder, key, title, note, PAGE_BAIDU);
         row.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         card.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        sw.setOnCheckedChange(new GlassSwitch.OnCheckedChange() {
+            @Override public void onCheckedChanged(GlassSwitch view, boolean next) {
+                boolean ok = false;
+                try { ok = io.github.ldxm666.bmapclean.App.write(key, next); } catch (Throwable ignored) {}
+                if (!ok) {
+                    view.setChecked(!next, true);
+                    Toast.makeText(MainActivity.this, "LSPosed 服务未连接，请稍后重试",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { sw.performClick(); }
+        });
+        if (note != null && note.length() > 0) addNoteRow(card, note);
+    }
+
+    /** 腾讯那一页的信息卡：模块状态 + 最近一次回报 + 学到的工具目录条数 */
+    private void addTmapInfoCard(LinearLayout root) {
+        LinearLayout card = newCard();
+        LinearLayout.LayoutParams clp = cardLp();
+        root.addView(card, clp);
+
+        TextView head = text("腾讯地图 · 界面精简", 15, Typeface.BOLD, cTxP());
+        head.setPadding(0, dp(2), 0, dp(8));
+        card.addView(head);
+
+        // 「界面规则执行 / 累计回报 / 已学到 N 个首页工具」那一大片诊断文字已按 LO 要求移除
+        // （2026-10-14）：用户要的是开关，不是 hook 计数。诊断仍可通过 logcat 看（TAG=TMapClean）。
+    }
+
+    /** 腾讯组的开关行（第三个配置 group：tmapclean_config） */
+    private void addTmapSwitch(final LinearLayout card, String title, final String key, String note) {
+        LinearLayout row = newSwitchRow(card, key, title, note);
+        TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
+        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setLineSpacing(0, 1.15f);
+        row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        final GlassSwitch sw = makeSwitch();
+        sw.setLabel(title);
+        boolean def = io.github.ldxm666.tmapclean.Spec.defaultChecked(
+                key, io.github.ldxm666.tmapclean.Spec.APP_READ);
+        try {
+            sw.setChecked(io.github.ldxm666.tmapclean.App.read(key, def), false);
+        } catch (Throwable t) {
+            sw.setChecked(def, false);
+        }
+        tmapSwitches.put(key, sw);
+        row.addView(sw, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        sw.setOnCheckedChange(new GlassSwitch.OnCheckedChange() {
+            @Override public void onCheckedChanged(GlassSwitch view, boolean next) {
+                boolean ok = false;
+                try { ok = io.github.ldxm666.tmapclean.App.write(key, next); } catch (Throwable ignored) {}
+                if (!ok) {
+                    view.setChecked(!next, true);
+                    Toast.makeText(MainActivity.this, "LSPosed 服务未连接，请稍后重试",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { sw.performClick(); }
+        });
         if (note != null && note.length() > 0) addNoteRow(card, note);
     }
 
@@ -910,45 +1617,35 @@ public final class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
-    private void buildFooter(LinearLayout root) {
-        TextView tip = text("改动后请强停对应地图 App 并重新打开以生效；开关可随时单独开/关，无需全部统一调整", 12, Typeface.NORMAL, cTxS());
-        tip.setPadding(dp(4), dp(16), 0, dp(2));
-        root.addView(tip);
-
-        TextView ver = text("MapAdKiller v2.0.0 · 高德/百度/腾讯去广告 + 百度界面精简", 11, Typeface.NORMAL, cTxS());
-        ver.setAlpha(0.7f);
-        ver.setGravity(Gravity.CENTER);
-        ver.setPadding(0, dp(10), 0, 0);
-        root.addView(ver, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-    }
-
-    /** 底部悬浮玻璃操作栏 */
+    /** 底部悬浮玻璃操作栏：作为 root 的覆盖层浮在 pager 之上，不占布局流 */
     private void buildBottomBar() {
         bottomBar = new LinearLayout(this);
         bottomBar.setOrientation(LinearLayout.HORIZONTAL);
         bottomBar.setGravity(Gravity.CENTER);
-        bottomBar.setPadding(dp(8), dp(8), dp(8), dp(8));
+        bottomBar.setPadding(dp(7), dp(7), dp(7), dp(7));
         bottomBar.setBackground(glass(26));
-        bottomBar.setElevation(dp(10));
+        bottomBar.setElevation(0);
+        UiKit.clipRounded(bottomBar, dp(26));
 
         bottomBar.addView(barChip("SDK 清单", new Runnable() {
             @Override public void run() { showLearnedSdks(); }
         }));
-        bottomBar.addView(spacer(dp(8)));
+        bottomBar.addView(spacer(dp(6)));
         bottomBar.addView(barChip("配置", new Runnable() {
             @Override public void run() { showConfigManager(); }
         }));
-        bottomBar.addView(spacer(dp(8)));
+        bottomBar.addView(spacer(dp(6)));
         bottomBar.addView(barChip("联系作者", new Runnable() {
             @Override public void run() { showContact(); }
         }));
 
+        // Root is a FrameLayout wrapper only for the bar overlay; the page column is the
+        // first child. Using a dedicated overlay host keeps the bar out of the vertical
+        // flow so the pager genuinely fills the remaining space.
         barLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         barLp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
         barLp.setMargins(dp(14), 0, dp(14), dp(14));
-        page.addView(bottomBar, barLp);
     }
 
     private View spacer(int w) {
@@ -961,14 +1658,13 @@ public final class MainActivity extends Activity {
     private TextView barChip(String label, Runnable action) {
         TextView c = text(label, 13, Typeface.BOLD, cAccent());
         c.setGravity(Gravity.CENTER);
-        c.setPadding(dp(18), dp(9), dp(18), dp(9));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(dark ? 0x2E7AB1FF : 0x330A6CF5);
-        bg.setCornerRadius(dp(HEAD_R));
-        c.setBackground(ripple(bg, HEAD_R));
+        c.setPadding(dp(16), dp(10), dp(16), dp(10));
+        c.setBackground(UiKit.ripple(cRipple(),
+                UiKit.plate(dark ? 0x2E7AB1FF : 0x330A6CF5, dp(20)), dp(20)));
         c.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { action.run(); }
         });
+        UiKit.pressable(c, 0.93f);
         return c;
     }
 
@@ -1012,19 +1708,101 @@ public final class MainActivity extends Activity {
         else if (scopeOk) l2 = "作用域已勾选 · " + picked + "（" + scoped + "/" + targets.length + "）";
         else l2 = "作用域未包含地图 · 请在框架管理器勾选地图应用";
 
-        String plain = "●  " + l1 + "\n●  " + l2;
-        android.text.SpannableString ss = new android.text.SpannableString(plain);
-        int second = plain.indexOf('\n') + 1;
-        ss.setSpan(new android.text.style.ForegroundColorSpan(connected ? cDotOk() : cTxS()),
-                0, 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
         int scopeColor = !state.scopeKnown ? cTxS() : (scopeOk ? cDotOk() : cDotBad());
-        ss.setSpan(new android.text.style.ForegroundColorSpan(scopeColor),
-                second, second + 1, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
-        statusView.setText(ss);
+
+        // The hero shows a one-line verdict plus a coloured status pill; the full
+        // scope / compatibility dump now lives behind a tap so it cannot wrap and
+        // stretch the header the way the old five-row block did.
+        int pillColor = connected && scopeOk ? cDotOk() : (connected ? cDotBad() : cTxS());
+        scopeMetric = state.scopeKnown ? (scoped + "/" + targets.length) : "未知";
+        scopeMetricColor = !state.scopeKnown ? cTxS() : (scopeOk ? cDotOk() : cDotBad());
+
+        // 心跳每几秒跑一次；文案与配色没变就不要再 setText / 重新分配 drawable。
+        String sig = connected + "|" + state.loaded + "|" + state.scopeKnown + "|" + scoped
+                + "|" + targets.length + "|" + state.frameworkLabel() + "|" + l1 + "|" + l2;
+        if (!sig.equals(lastStatusSig)) {
+            lastStatusSig = sig;
+            if (statusPillText != null) {
+                statusPillText.setText(connected ? (scopeOk ? "已就绪" : "待配置") : "连接中");
+                statusPillText.setTextColor(pillColor);
+            }
+            if (navPill != null && navPill.getChildCount() > 0) {
+                navPill.getChildAt(0).setBackground(pillDot(pillColor));
+            }
+            statusView.setText(l1 + "　·　" + l2);
+        }
+        refreshMetrics();
+    }
+
+    private String lastStatusSig;
+    private int pillDotColor;
+    private GradientDrawable pillDotCache;
+
+    /** 缓存 7dp 状态圆点：renderStatus 跑在心跳上，不该每拍都分配一个 drawable。 */
+    private GradientDrawable pillDot(int color) {
+        if (pillDotCache == null || pillDotColor != color) {
+            pillDotColor = color;
+            pillDotCache = dotDrawable(color, 7);
+        }
+        return pillDotCache;
+    }
+
+    /** 圆形色点 drawable（用于刷新状态药丸里的圆点） */
+    private GradientDrawable dotDrawable(int color, int sizeDp) {
+        int s = dp(sizeDp);
+        GradientDrawable g = new GradientDrawable();
+        g.setShape(GradientDrawable.OVAL);
+        g.setColor(color);
+        g.setSize(s, s);
+        return g;
+    }
+
+    /** 状态详情弹层：把 hero 折叠掉的适配 / 作用域信息集中展示 */
+    private void showStatusDetail() {
+        FrameworkStatus.Snapshot state = io.github.ldxm666.mapclean.App.frameworkStatus();
+        StringBuilder sb = new StringBuilder();
+        sb.append("框架：").append(state.connected
+                ? (state.loaded ? state.frameworkLabel() : "已连接（读取中）") : "未连接");
+        if (state.apiVersion > 0) sb.append("　API ").append(state.apiVersion);
+        sb.append("\n");
+        sb.append("作用域：").append(state.scopeKnown ? joinScope(state) : "读取失败");
+        sb.append("\n");
+        sb.append("本机版本：v").append(Version.NAME);
+        String latest = UpdateChecker.latest(this);
+        if (latest != null && latest.length() > 0) sb.append("　最新：v").append(latest);
+        sb.append("\n");
+        int sdk = 0;
+        try { sdk = SdkAutoBlock.learnedListForApp().size(); } catch (Throwable ignored) {}
+        sb.append("已捕获广告 SDK：").append(sdk).append(" 个");
+        String ready = adLine == null ? "" : String.valueOf(adLine.getText());
+        if (ready.length() > 0) sb.append("\n").append(ready);
+
+        glassDialog("运行状态", sb.toString(),
+                "查看 SDK 清单", new Runnable() {
+                    @Override public void run() { showLearnedSdks(); }
+                },
+                null, null,
+                "关闭", null);
+    }
+
+    private String joinScope(FrameworkStatus.Snapshot state) {
+        String[] targets = {MainHook.PKG_AMAP, MainHook.PKG_BMAP, MainHook.PKG_TMAP};
+        String[] labels = {"高德", "百度", "腾讯"};
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < targets.length; i++) {
+            if (!state.scope.contains(targets[i])) continue;
+            if (sb.length() > 0) sb.append(" / ");
+            sb.append(labels[i]);
+        }
+        return sb.length() == 0 ? "未包含地图" : sb.toString();
     }
 
     private final android.os.Handler statusHandler =
             new android.os.Handler(android.os.Looper.getMainLooper());
+
+    /** 绑定前快轮询（等 LSPosed 服务），绑定后降频，避免每 800ms 白跑一遍 UI 刷新。 */
+    private static final long POLL_FAST = 400L;
+    private static final long POLL_SLOW = 2500L;
 
     private final Runnable statusRefresher = new Runnable() {
         @Override public void run() {
@@ -1033,15 +1811,18 @@ public final class MainActivity extends Activity {
             // 服务是异步绑定的：绑定前 readState() 只能回退默认 true，
             // 若此时就把开关画成"开"，用户重开设置页会以为配置全丢了。
             // 所以绑定成功后立刻按真实存储重刷一遍开关。
-            if (!synced && App.svc() != null) {
+            boolean bound = App.svc() != null;
+            if (bound && !synced) {
                 synced = true;
                 syncSwitches();
+            } else if (!bound && synced) {
+                synced = false;      // 服务掉了：下次绑定要重新对齐一遍开关
             }
-            statusHandler.postDelayed(this, 800);
+            statusHandler.postDelayed(this, synced ? POLL_SLOW : POLL_FAST);
         }
     };
 
-    private final Map<String, Switch> switches = new LinkedHashMap<>();
+    private final Map<String, GlassSwitch> switches = new LinkedHashMap<>();
     private volatile boolean synced;
 
     private void syncSwitches() {
@@ -1050,22 +1831,31 @@ public final class MainActivity extends Activity {
             if (s == null) return;
             android.content.SharedPreferences p =
                     s.getRemotePreferences(Config.PREF_GROUP);
-            for (Map.Entry<String, Switch> e : switches.entrySet()) {
-                Switch sw = e.getValue();
-                sw.setChecked(Config.readVisible(p, e.getKey()));
-                sw.setEnabled(true);
-                sw.setAlpha(1f);
+            // 一次 getAll() 拿整张表：readVisible(prefs,key) 每个键都会复制一份 TreeMap。
+            java.util.Map<String, ?> values = p.getAll();
+            for (Map.Entry<String, GlassSwitch> e : switches.entrySet()) {
+                GlassSwitch sw = e.getValue();
+                sw.setChecked(Config.readVisible(values, e.getKey()), false);
             }
             // 百度那一页用的是另一个 group（bmapclean_config）—— 单独再刷一遍
             try {
                 android.content.SharedPreferences bp =
                         s.getRemotePreferences(io.github.ldxm666.bmapclean.Cfg.GROUP);
-                for (Map.Entry<String, Switch> e : bmapSwitches.entrySet()) {
-                    Switch sw = e.getValue();
+                for (Map.Entry<String, GlassSwitch> e : bmapSwitches.entrySet()) {
+                    GlassSwitch sw = e.getValue();
                     sw.setChecked(bp.getBoolean(e.getKey(),
-                            io.github.ldxm666.bmapclean.Spec.defaultVisible(e.getKey())));
-                    sw.setEnabled(true);
-                    sw.setAlpha(1f);
+                            io.github.ldxm666.bmapclean.Spec.defaultVisible(e.getKey())), false);
+                }
+            } catch (Throwable ignored) {}
+            // 腾讯那一页同理（tmapclean_config）
+            try {
+                android.content.SharedPreferences tp =
+                        s.getRemotePreferences(io.github.ldxm666.tmapclean.Cfg.GROUP);
+                for (Map.Entry<String, GlassSwitch> e : tmapSwitches.entrySet()) {
+                    GlassSwitch sw = e.getValue();
+                    sw.setChecked(tp.getBoolean(e.getKey(),
+                            io.github.ldxm666.tmapclean.Spec.defaultChecked(
+                                    e.getKey(), io.github.ldxm666.tmapclean.Spec.APP_READ)), false);
                 }
             } catch (Throwable ignored) {}
             refreshSdkRow();
@@ -1333,6 +2123,9 @@ public final class MainActivity extends Activity {
         int pad = dp(20);
         box.setPadding(pad, dp(18), pad, dp(10));
         box.addView(text("导入配置", 18, Typeface.BOLD, cTxP()));
+        // 内置默认配置的入口与导入同源（都是「把一份 JSON 应用过来」），放在这里而不是
+        // 再挤一个按钮进「更多」—— 那个对话框的三键布局是固定的。
+        box.addView(restoreDefaultsRow());
         LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(130));
         ilp.topMargin = dp(12);
@@ -1382,6 +2175,52 @@ public final class MainActivity extends Activity {
             applyConfig(new JSONObject(text));
         } catch (Throwable t) {
             Toast.makeText(this, "JSON 解析失败", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /**
+     * 「恢复默认配置」一行：重新应用模块内置的那份 JSON。
+     *
+     * <p>与 {@link #importConfig()} 的写入逻辑同源（都走 {@code DefaultConfig}），不重复造。
+     * 与应用首启的区别只有一处：这里是无条件覆盖，所以先确认。
+     */
+    private View restoreDefaultsRow() {
+        TextView action = text("恢复默认配置", 13, Typeface.BOLD, cAccent());
+        action.setPadding(dp(2), dp(6), dp(2), dp(6));
+        action.setBackground(ripple(dark ? tintBg(0x2E7AB1FF) : tintBg(0x1E0A6CF5), HEAD_R));
+        action.setGravity(Gravity.CENTER);
+        action.setContentDescription("重新应用模块内置的默认配置，会覆盖当前开关");
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(10);
+        action.setLayoutParams(lp);
+        action.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                glassDialog("恢复默认配置？",
+                        "将把模块内置的默认配置重新写入，会覆盖你已经改过的开关。\n\n"
+                        + "没有值的项（null）保持原样；写入后重开地图生效。",
+                        "恢复", new Runnable() {
+                            @Override public void run() { applyBuiltInDefaults(); }
+                        }, null, null, "取消", null);
+            }
+        });
+        return action;
+    }
+
+    /** 应用内置默认配置并刷新界面；失败只提示，不中断。 */
+    private void applyBuiltInDefaults() {
+        try {
+            DefaultConfig.Result result = DefaultConfig.apply(this);
+            if (result.groups.isEmpty()) {
+                Toast.makeText(this, "没有可写入的默认配置（服务未连接或资源缺失）",
+                        Toast.LENGTH_LONG).show();
+                return;
+            }
+            Toast.makeText(this, "已恢复 " + result.applied + " 项，重开地图后生效",
+                    Toast.LENGTH_LONG).show();
+            recreate();
+        } catch (Throwable t) {
+            Toast.makeText(this, "恢复失败：" + t.getMessage(), Toast.LENGTH_LONG).show();
         }
     }
 
@@ -1438,9 +2277,10 @@ public final class MainActivity extends Activity {
     private LinearLayout newCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(glass(GLASS_R));
-        card.setClipToOutline(true);
-        card.setPadding(dp(12), 0, dp(12), 0);
+        card.setBackground(glass(22));
+        card.setPadding(dp(10), dp(4), dp(10), dp(4));
+        card.setElevation(0);
+        UiKit.clipRounded(card, dp(22));
         return card;
     }
 
@@ -1453,81 +2293,105 @@ public final class MainActivity extends Activity {
 
     private View divider() {
         View d = new View(this);
-        d.setBackgroundColor(dark ? 0x1EFFFFFF : 0x16000000);
+        d.setBackgroundColor(dark ? 0x14FFFFFF : 0x0F000000);
         d.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
         return d;
     }
 
+    /** 行容器：60dp 最小高、行级涟漪、可点回弹 */
     private LinearLayout newRow(LinearLayout card) {
         if (card.getChildCount() > 0) card.addView(divider());
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(52));
-        row.setPadding(dp(4), 0, dp(4), 0);
-        row.setBackground(ripple(null, 12));
+        row.setMinimumHeight(dp(60));
+        row.setPadding(dp(6), 0, dp(6), 0);
+        row.setBackground(UiKit.rippleBare(cRipple(), dp(14)));
         return row;
     }
 
-    /** 统一规格开关行：52dp 高、左标题右 Switch、行间分隔线（写 RemotePreferences） */
-    private void addSwitch(final LinearLayout card, String title, final String key) {
+    /**
+     * 开关行 + 搜索索引。
+     *
+     * <p>haystack（标题 + 备注 + 配置键）直接挂在行的 tag 上，搜索时
+     * {@link #filterRows} 顺着视图树读出来即可 —— 不必另外维护一份
+     * “行 → key”的映射，也就不可能和界面显示的文字脱节。
+     */
+    private LinearLayout newSwitchRow(LinearLayout card, String key, String title, String note) {
         LinearLayout row = newRow(card);
+        StringBuilder sb = new StringBuilder();
+        sb.append(title == null ? "" : title);
+        if (note != null && note.length() > 0) sb.append('\n').append(note);
+        sb.append('\n').append(key == null ? "" : key);
+        row.setTag(TAG_HAYSTACK, sb.toString());
+        return row;
+    }
 
-        TextView label = text(title, 15, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(12), dp(8), dp(12));
+    /** 行上缓存的 haystack key。用框架不会占用的负数 id，避免再建 ids.xml。 */
+    private static final int TAG_HAYSTACK = 0x7f0f0001;
+    /** 统一规格开关行：60dp 最小高、左标题右侧胶囊开关、行间分隔线（写 RemotePreferences） */
+    private void addSwitch(final LinearLayout card, String title, final String key) {
+        LinearLayout row = newSwitchRow(card, key, title, null);
+
+        TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
+        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setLineSpacing(0, 1.15f);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        final Switch sw = makeSwitch();
-        sw.setChecked(readState(key));
-        // 服务未绑定时先禁用，等 syncSwitches() 用真实存储值刷新后再放开
-        sw.setEnabled(App.svc() != null);
-        sw.setClickable(false);
+        final GlassSwitch sw = makeSwitch();
+        sw.setLabel(title);
+        sw.setChecked(readState(key), false);
         switches.put(key, sw);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                boolean next = !sw.isChecked();
-                if (App.writeBoolean(key, next)) {
-                    sw.setChecked(next);
-                    if (Config.K_TOOLS_ALLOWLIST.equals(key)) syncSwitches();
-                } else {
-                    Toast.makeText(MainActivity.this, "LSPosed 服务未连接，请稍后重试", Toast.LENGTH_SHORT).show();
-                }
-            }
-        });
-        sw.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
-            @Override public void onCheckedChanged(CompoundButton b, boolean checked) { /* 由行点击驱动 */ }
-        });
+        index(finder, key, title, null, PAGE_AMAP);
         row.addView(sw, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
         card.addView(row, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 单一真相路径：开关自己吃掉点击并翻转 → 回调里落盘；落盘失败就回滚。
+        // 行点击只是把同一个 performClick() 代理一遍，所以胶囊与行永远不会打架。
+        sw.setOnCheckedChange(new GlassSwitch.OnCheckedChange() {
+            @Override public void onCheckedChanged(GlassSwitch view, boolean next) {
+                if (App.writeBoolean(key, next)) {
+                    if (Config.K_TOOLS_ALLOWLIST.equals(key)) syncSwitches();
+                } else {
+                    view.setChecked(!next, true);
+                    Toast.makeText(MainActivity.this, "LSPosed 服务未连接，请稍后重试",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { sw.performClick(); }
+        });
     }
 
+    /** 本地开关行（不走 LSPosed RemotePreferences），仅用于模块 App 自身组件可见性。 */
     /** 本地开关行（不走 LSPosed RemotePreferences），仅用于模块 App 自身组件可见性。 */
     private void addLocalSwitch(final LinearLayout card, String title, final String key) {
         LinearLayout row = newRow(card);
 
-        TextView label = text(title, 15, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(12), dp(8), dp(12));
+        TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
+        label.setPadding(0, dp(14), dp(10), dp(14));
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        final Switch sw = makeSwitch();
+        final GlassSwitch sw = makeSwitch();
+        sw.setLabel(title);
         boolean on = false;
         try {
             on = getSharedPreferences(App.UI_PREFS, MODE_PRIVATE).getBoolean(key, false);
         } catch (Throwable ignored) {}
-        sw.setChecked(on);
-        sw.setEnabled(true);
-        sw.setAlpha(1f);
-        sw.setClickable(false);
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) {
-                final boolean next = !sw.isChecked();
-                if (!next) {
-                    applyHide(next, sw);
-                    return;
-                }
+        sw.setChecked(on, false);
+        row.addView(sw, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        card.addView(row, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 本地开关不进 RemotePreferences：翻转后先弹确认，确认了才落盘，取消就回滚。
+        sw.setOnCheckedChange(new GlassSwitch.OnCheckedChange() {
+            @Override public void onCheckedChanged(GlassSwitch view, boolean next) {
+                if (!next) { applyHide(false, view); return; }
                 // 桌面入口（LAUNCHER alias）禁掉后桌面看不到，但 LSPosed 管理器
                 // 走 CATEGORY_INFO 通道（见 AndroidManifest 注释），入口不受影响。
                 glassDialog("隐藏桌面图标？",
@@ -1535,17 +2399,18 @@ public final class MainActivity extends Activity {
                         + "· LSPosed 管理器里的「打开」入口不受影响，随时可回到本页\n"
                         + "· 快捷设置磁贴与 adb 命令同样始终可用",
                         "仍然隐藏", new Runnable() {
-                            @Override public void run() { applyHide(true, sw); }
-                        }, null, null, "取消", null);
+                            @Override public void run() { applyHide(true, view); }
+                        }, null, null, "取消", new Runnable() {
+                            @Override public void run() { view.setChecked(false, true); }
+                        });
             }
         });
-        row.addView(sw, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
-        card.addView(row, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { sw.performClick(); }
+        });
     }
 
-    private void applyHide(boolean hide, Switch sw) {
+    private void applyHide(boolean hide, GlassSwitch sw) {
         if (embedded()) return;
         boolean ok = App.setHideIcon(MainActivity.this, hide);
         sw.setChecked(hide);
@@ -1581,29 +2446,48 @@ public final class MainActivity extends Activity {
 
     private TextView addActionButton(LinearLayout card, String title, final Runnable action) {
         if (card.getChildCount() > 0) card.addView(divider());
-        TextView label = text(title, 15, Typeface.NORMAL, cAccent());
-        label.setPadding(dp(4), dp(12), dp(8), dp(12));
+        TextView label = text(title, 13.5f, Typeface.BOLD, cAccent());
+        label.setPadding(dp(14), dp(13), dp(14), dp(13));
         label.setGravity(Gravity.CENTER);
-        label.setBackground(ripple(null, 12));
+        label.setBackground(UiKit.ripple(cRipple(), UiKit.plate(tintBg(), dp(14)), dp(14)));
         label.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { action.run(); }
         });
-        card.addView(label, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        UiKit.pressable(label, 0.97f);
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(10);
+        lp.bottomMargin = dp(10);
+        card.addView(label, lp);
         return label;
     }
 
+    private int tintBg() { return dark ? 0x2E7AB1FF : 0x1A0A6CF5; }
+
+    /** 说明文字：左侧细色条 + 淡色正文，与开关行区分开 */
     private void addNoteRow(LinearLayout card, String s) {
-        TextView t = text(s, 13, Typeface.NORMAL, cTxS());
-        t.setPadding(dp(4), dp(12), dp(4), dp(12));
-        t.setLineSpacing(0, 1.15f);
-        card.addView(t, new LinearLayout.LayoutParams(
+        LinearLayout wrap = new LinearLayout(this);
+        wrap.setOrientation(LinearLayout.HORIZONTAL);
+        wrap.setPadding(dp(6), dp(12), dp(6), dp(12));
+
+        View rule = new View(this);
+        LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(dp(2),
+                ViewGroup.LayoutParams.MATCH_PARENT);
+        ruleLp.rightMargin = dp(10);
+        rule.setBackground(UiKit.plate(dark ? 0x33FFFFFF : 0x1F000000, dp(1)));
+        wrap.addView(rule, ruleLp);
+
+        TextView t = text(s, 12.5f, Typeface.NORMAL, cTxS());
+        t.setLineSpacing(dp(2), 1.18f);
+        wrap.addView(t, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(wrap, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
 
     // ---------------------------------------------------------------- 基础工厂
 
-    private TextView text(String s, int sp, int style, int color) {
+    private TextView text(String s, float sp, int style, int color) {
         TextView t = new TextView(this);
         t.setText(s);
         t.setTextSize(sp);

@@ -54,9 +54,37 @@ public final class MainHook {
         }
 
         if (!PKG_AMAP.equals(pkg) && !PKG_BMAP.equals(pkg) && !PKG_TMAP.equals(pkg)) return;
-        // 只挂主进程（广告 UI 均在主进程；子进程 :locationservice/:widgetProvider 等跳过）
-        if (process != null && process.contains(":")) {
-            H.log(Log.INFO, TAG, "event=skip_subprocess pkg=" + pkg + " process=" + process);
+
+        // ── 进程策略（17.02 / 2.3.0）──────────────────────────────────────────────
+        // 主进程：全量（广告 UI 全在主进程）。
+        // 高德的两个常驻子进程：只挂 **最小 kill 集**（AmapSubprocess），绝不挂 UI/数据层逻辑。
+        // 其余子进程（:lite1…:lite5 H5 容器 / :pushservice / :QQPlayerProcess /
+        //   :dumpcrashservice / :installerror …）：直接跳过 —— 那些进程里挂 hook 只有风险没收益。
+        //
+        // 关于 H.markInstalled：它是 **static Set**，而 Android 每个进程是独立 VM，
+        // 所以它天然就是 per-process 的 —— 主进程和子进程各有自己的一份，
+        // `:locationservice` 里第一次调用同样返回 true，不会被子进程"抢先"或"误判已装"。
+        // 它防的是**同一进程内重复 install**（真机日志里 activity lifecycle callbacks
+        // 打了 3 次就是它拦下的）。⇒ 放开子进程**不需要改 H**，也不该改。
+        final boolean secondary = process != null && process.contains(":");
+        if (secondary) {
+            if (PKG_AMAP.equals(pkg) && AmapSubprocess.handles(process)) {
+                if (!H.markInstalled(pkg)) {
+                    H.log(Log.INFO, TAG, "event=install_skipped reason=already pkg=" + pkg
+                            + " process=" + process);
+                    return;
+                }
+                H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg
+                        + " process=" + process + " mode=subprocess");
+                try {
+                    AmapSubprocess.install(param.getClassLoader(), process);
+                } catch (Throwable t) {
+                    H.log(Log.ERROR, TAG, "event=install_failed pkg=" + pkg
+                            + " process=" + process, t);
+                }
+            } else {
+                H.log(Log.INFO, TAG, "event=skip_subprocess pkg=" + pkg + " process=" + process);
+            }
             return;
         }
         if (!H.markInstalled(pkg)) {
@@ -68,16 +96,63 @@ public final class MainHook {
         try {
             switch (pkg) {
                 case PKG_AMAP:
-                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg);
+                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg
+                            + " process=" + process + " mode=main");
                     AmapHooks.install(cl);   // 去广告基线
+                    // 阿里妈妈广告请求层（开屏广告请求 + 广告埋点上报）。
+                    // 刻意放在 AmapHooks **之外**：AmapHooks 是"高德自有界面/数据层"的总入口，
+                    // 而这一层是 SDK 形态的广告通道（ws/valueadded/alimama/splash_screen、
+                    // ws/h5_log），单独成文件便于审计、便于单独回滚，也不受 AmapHooks 的
+                    // feature() 计数口径影响。
+                    try {
+                        AmapAlimama.install(cl);
+                    } catch (Throwable t) {
+                        H.log(Log.WARN, TAG, "event=alimama_failed", t);
+                    }
+                    // 阿里 UT 埋点初始化闸门（com.alibaba.analytics.AnalyticsMgr.init/checkInit）。
+                    // 同样独立成文件：它拦的是**第三方埋点 SDK**，与"去广告"是两件事，
+                    // 回滚粒度必须分开（见 Config.K_TRACK_OFF）。
+                    try {
+                        AmapTrack.install(cl);
+                    } catch (Throwable t) {
+                        H.log(Log.WARN, TAG, "event=track_failed", t);
+                    }
+                    // 杠杆 A：WorkManager 的两条执行通道（RescheduleReceiver + SystemJobService）。
+                    // 这两个组件都在**主进程**（components.csv: process 为空），所以在这里装；
+                    // 推送长连接（ACCS/AGOO）在 :locationservice，由 AmapSubprocess 装。
+                    try {
+                        AmapJob.installMain(cl);
+                    } catch (Throwable t) {
+                        H.log(Log.WARN, TAG, "event=job_failed", t);
+                    }
+                    // 推送长连接（ACCS/AGOO）**主进程也装一份**。
+                    // 真机观测到的 ACCS0 在 :locationservice（由 AmapSubprocess 装），
+                    // 但高德完全可能同时从主进程初始化 accs（SDK 常见做法）⇒ 主进程也挂一次，
+                    // 让 ACCS0 无论在哪初始化都被掐断。
+                    // 代价为零：类在本进程加载得到就装，装不上/不触发就空转，不会报错。
+                    try {
+                        AmapJob.installPush(cl);
+                    } catch (Throwable t) {
+                        H.log(Log.WARN, TAG, "event=push_failed", t);
+                    }
                     break;
                 case PKG_BMAP:
-                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg);
-                    // 百度由 bmapclean 的版本适配器统一接管。
+                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg + " process=" + process);
+                    // 百度界面精简在 bmapclean 里。一个 APK 只能有一个 Xposed 入口，
+                    // 所以这里**必须**显式转发。
+                    //
+                    // 这两个转发调用曾经被删掉（当时是为了让"只并入高德"的免 root 精简构建
+                    // 能编译），结果连完整模块的百度一起失效了：免 root 版不需要百度，
+                    // 但模块版需要。正确做法是给精简构建生成 no-op 桩类
+                    // （见 tools/build_variant.py 的 STUBS），而不是把调用从共享源码里拿掉。
+                    io.github.ldxm666.bmapclean.MainHook.onPackageReady(mod, param);
                     break;
                 case PKG_TMAP:
-                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg);
+                    H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg + " process=" + process);
                     TmapHooks.install(cl);
+                    // 腾讯界面精简在 tmapclean 里。同百度：一个 APK 只能有一个 Xposed 入口，
+                    // 所以这里**必须**显式转发（精简构建由 tools/build_variant.py 出 no-op 桩）。
+                    io.github.ldxm666.tmapclean.MainHook.onPackageReady(mod, param);
                     break;
                 default:
                     break;

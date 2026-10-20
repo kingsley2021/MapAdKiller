@@ -40,7 +40,25 @@ public final class UpdateChecker {
     private static final String K_AT = "ver_check_at";
     private static final String K_VER = "ver_latest";
     private static final String K_SRC = "ver_source";
+    /** 已经用 Toast 提示过的新版本号，用于「每个新版本只提示一次」。 */
+    private static final String K_TOASTED = "ver_toast_shown";
     private static final long THROTTLE_MS = 6L * 60 * 60 * 1000L;
+    /** 自动检查的间隔：一天一次就够，失败也照样计时（避免每次启动都重试）。 */
+    private static final long AUTO_INTERVAL_MS = 24L * 60 * 60 * 1000L;
+    /**
+     * 隐藏的「模拟新版」开关（默认不存在 = 关闭，不出现在任何可见界面）。
+     *
+     * <p>存在的唯一理由是可测试性：面板首次打开会真的后台查一次，立刻把手写进
+     * {@code ver_latest} 的值覆盖回真实版本，于是「红色胶囊 + 新版本小标」这条分支
+     * 在真机上**无法**靠改配置复现。置 true 时读取端直接返回 {@link #SIMULATED_VERSION}
+     * 并跳过一切网络请求，让验证者纯靠配置就能测四样东西：红胶囊、小标、一次性 Toast、
+     * 镜像下载按钮。
+     */
+    private static final String K_SIMULATE = "ver_simulate_new";
+    /** 远高于任何真实版本，保证 {@link #compare} 一定判「有新版」。 */
+    private static final String SIMULATED_VERSION = "9.9.9";
+    /** 每进程只打一行 {@code event=update_simulated}。 */
+    private static volatile boolean simLogged;
 
     private static final Handler MAIN = new Handler(Looper.getMainLooper());
     private static volatile boolean sRunning;
@@ -51,6 +69,8 @@ public final class UpdateChecker {
 
     /** 上次查到的线上版本（可能为 null） */
     public static String latest(Context c) {
+        String simulated = simulatedLatest(c);
+        if (simulated != null) return simulated;
         try {
             return prefs(c).getString(K_VER, null);
         } catch (Throwable t) {
@@ -58,7 +78,36 @@ public final class UpdateChecker {
         }
     }
 
+    /**
+     * 隐藏开关是否打开；打开时返回 {@link #SIMULATED_VERSION}，否则 null。
+     *
+     * <p>两个库都看：嵌入版里 {@code ver_*} 落在 {@code mapclean_embedded_ui}（宿主数据目录），
+     * 独立模块进程里落在 {@code mak_ui}。测试员把同一个键写进任意一个都能复现，
+     * 不必先判断当前是哪一种安装形态。
+     */
+    private static String simulatedLatest(Context c) {
+        if (c == null) return null;
+        boolean on = false;
+        try {
+            on = prefs(c).getBoolean(K_SIMULATE, false);
+        } catch (Throwable ignored) {}
+        if (!on) {
+            try {
+                on = c.getSharedPreferences(PREF, Context.MODE_PRIVATE)
+                        .getBoolean(K_SIMULATE, false);
+            } catch (Throwable ignored) {}
+        }
+        if (!on) return null;
+        if (!simLogged) {
+            simLogged = true;
+            Log.i(TAG, "event=update_simulated latest=" + SIMULATED_VERSION
+                    + " local=" + Version.NAME);
+        }
+        return SIMULATED_VERSION;
+    }
+
     public static String source(Context c) {
+        if (simulatedLatest(c) != null) return "simulate";
         try {
             return prefs(c).getString(K_SRC, "");
         } catch (Throwable t) {
@@ -71,9 +120,97 @@ public final class UpdateChecker {
         return v != null && compare(v, Version.NAME) > 0;
     }
 
+    /** Same question as {@link #isOutdated}, named for the call sites that ask it. */
+    public static boolean hasNewVersion(Context c) {
+        return isOutdated(c);
+    }
+
+    /**
+     * 上次检查的时间（毫秒，0 = 从未查过）。
+     *
+     * <p>成功和失败都会写这个值（见 {@link #check}），所以「失败后每次启动都重试」不会发生。
+     */
+    public static long lastCheckAt(Context c) {
+        try {
+            return prefs(c).getLong(K_AT, 0L);
+        } catch (Throwable t) {
+            return 0L;
+        }
+    }
+
+    /**
+     * 每天最多一次的后台自动检查。
+     *
+     * <p>节流：{@code now - lastCheckAt < 24h} 直接返回，不建线程、不发请求。
+     * 计时用的是 {@code check()} 自己在结束时写入的 {@code K_AT}（成功/失败都写），
+     * 所以「今天查过且失败」⇒ 明天之前不再重试，不会每次开 App 都白等一轮超时。
+     *
+     * <p>线程：复用 {@link #check} 自己的独立线程（{@code mapclean-update}），
+     * 不占主线程、不用 Handler 轮询；重复触发由 {@code check()} 的 {@code sRunning} 兜住。
+     *
+     * <p>失败静默：只在日志里留一行，不 Toast、不改界面。
+     */
+    public static void maybeAutoCheck(final Context c) {
+        if (c == null) return;
+        if (simulatedLatest(c) != null) return;      // 模拟态：不发任何请求
+        final Context app;
+        try {
+            app = c.getApplicationContext();
+        } catch (Throwable t) {
+            return;
+        }
+        if (app == null) return;
+        long last = lastCheckAt(app);
+        long now = System.currentTimeMillis();
+        if (last > 0L && now - last < AUTO_INTERVAL_MS) return;
+        Log.i(TAG, "event=update_auto_start last=" + last);
+        check(app, true, new Callback() {
+            @Override public void onResult(String latest, boolean outdated, String source) {
+                if ("cache".equals(source)) return;      // 缓存回放，不是这次的结果
+                if (latest == null) {
+                    Log.w(TAG, "event=update_auto_failed source=" + source);
+                } else if (outdated) {
+                    Log.i(TAG, "event=update_auto_found latest=" + latest + " source=" + source);
+                } else {
+                    Log.i(TAG, "event=update_auto_latest latest=" + latest + " source=" + source);
+                }
+            }
+        });
+    }
+
+    /**
+     * 每个新版本只提示一次：返回 true 表示这次该提示（并已把版本号记下）。
+     *
+     * <p>去重键 {@code ver_toast_shown} 与 {@link #latest} 同库，所以清除数据后会重新提示一次，
+     * 这正是期望行为。
+     */
+    public static boolean shouldNotify(Context c) {
+        try {
+            String v = latest(c);
+            if (v == null || compare(v, Version.NAME) <= 0) return false;
+            SharedPreferences p = prefs(c);
+            if (v.equals(p.getString(K_TOASTED, null))) return false;
+            p.edit().putString(K_TOASTED, v).commit();
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
     /** 后台检查；force=false 时受 6 小时节流约束。回调在主线程。 */
     public static void check(final Context c, final boolean force, final Callback cb) {
         final Context app = c.getApplicationContext();
+        // 模拟态：绝不发网络请求，直接在主线程把模拟结果交回去。
+        // （不静默 return：那会让界面永远停在「检查中…」，验证者以为卡死了。）
+        final String sim = simulatedLatest(app);
+        if (sim != null) {
+            MAIN.post(new Runnable() {
+                @Override public void run() {
+                    if (cb != null) cb.onResult(sim, true, "simulate");
+                }
+            });
+            return;
+        }
         String cached = latest(app);
         if (cached != null && cb != null) {
             // 先把缓存结果吐出去，界面立刻有内容

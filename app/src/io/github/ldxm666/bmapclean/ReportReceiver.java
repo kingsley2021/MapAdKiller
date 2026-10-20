@@ -34,6 +34,20 @@ public final class ReportReceiver extends BroadcastReceiver {
             String detail = intent.getStringExtra("detail");
             long ts = intent.getLongExtra("ts", System.currentTimeMillis());
 
+            // 宫格新文案回报（stage="tools"）：只补开关，不覆盖诊断状态。
+            // 这里必须 merge + 落盘：本进程可能随时被回收，重开百度后
+            // BaiduHooks.install → Spec.loadDiscovered() 会把它们读回来。
+            if ("tools".equals(stage)) {
+                java.util.ArrayList<String> one = new java.util.ArrayList<>();
+                one.add(detail);
+                if (Spec.mergeDiscovered(one)) {
+                    Spec.persistDiscovered();
+                    Log.i("BMapCleanApp", "discovered tool label merged: " + detail);
+                }
+                App.notifyReport();
+                return;
+            }
+
             android.content.SharedPreferences sp = context.getSharedPreferences(P, Context.MODE_PRIVATE);
             long prev = sp.getLong("hook_ts", 0L);
             android.content.SharedPreferences.Editor e = sp.edit()

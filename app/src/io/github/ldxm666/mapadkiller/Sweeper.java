@@ -23,14 +23,17 @@ public final class Sweeper {
                       Object r = chain.proceed();
                       final Activity act = (Activity) chain.getThisObject();
                       Handler h = new Handler(Looper.getMainLooper());
-                      // v1.1.0：三轮全树扫砍到两轮。资源名已经按 id 缓存，
-                      // 单轮成本大幅下降，再少一轮进一步降负载。
+                      // v2.1.7：只保留 300ms 一轮，砍掉 2500ms 那轮全树扫描。
+                      //
+                      // 腾讯侧广告已在**数据层**掐断：GDTADManager.initWith / isInitialized
+                      // 返回 false、TGSplashAD.fetchAdOnly / preLoad 空转、gcd.a(ArrayList)
+                      // 过滤服务端卡片。视图树上不会再长出广告子树，每多一轮全树递归都是
+                      // 纯浪费 —— 用户反馈的"hook 卡顿"主要来自这里：地图是重视图树场景，
+                      // 每次切页面回来都要多走一遍上千节点的递归。
+                      // 真有懒加载广告冒出来，300ms 这一轮仍在。
                       h.postDelayed(new Runnable() {
                           @Override public void run() { killer.sweep(act); }
                       }, 300);
-                      h.postDelayed(new Runnable() {
-                          @Override public void run() { killer.sweep(act); }
-                      }, 2500);
                       return r;
                   }
               });

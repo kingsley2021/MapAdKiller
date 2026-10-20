@@ -29,6 +29,15 @@ Copy-Item "$App\stub-src","$App\src","$App\res","$App\META-INF","$App\libs" -Des
 Copy-Item "$App\AndroidManifest.xml" $src
 if (-not (Test-Path "$src\AndroidManifest.xml")) { throw "copy failed" }
 
+# 产物名按 Version.NAME 动态生成 —— 这里曾经硬编码 v2.1.6，改版本号时漏改就会
+# 把新版本号写进内容、却仍然输出旧文件名的 APK（发布时极易传错包）。
+$verText = [System.IO.File]::ReadAllText("$src\src\io\github\ldxm666\mapclean\Version.java")
+if ($verText -notmatch 'NAME\s*=\s*"([^"]+)"') { throw "cannot parse Version.NAME from Version.java" }
+$VerName = $Matches[1]
+if ($VerName -notmatch '^\d+\.\d+\.\d+$') { throw "unexpected Version.NAME: $VerName" }
+$LspName = "MapClean-lsp-v$VerName.apk"
+Write-Host "module version = $VerName  ->  output $LspName"
+
 $EAP = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
 
@@ -48,6 +57,27 @@ Copy-Item "$src\libs\service-classes.jar" "$src\build\service-classes.jar"
 cmd /c "`"$Bt\d8.bat`" --min-api 26 --lib `"$Aj`" --lib `"$src\libs\api-102.0.0.jar`" --output `"$src\build\dex`" `"$src\build\classes.jar`" `"$src\build\service-classes.jar`" `"$src\libs\interface-102.0.0.jar`" > `"$src\build\d8.log`" 2>&1"
 Get-Content "$src\build\d8.log" -ErrorAction SilentlyContinue | Select-Object -Last 15
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$src\build\dex\classes.dex")) { throw "d8 failed" }
+
+# 百度 / 腾讯必须仍被转发到。
+#
+# 一个 APK 只能声明一个 Xposed 入口（META-INF/xposed/java_init.list），百度与腾讯那两半
+# 只能靠共享源码里的显式转发到达。曾经为了让"只并入高德"的免 root 精简构建能编译，
+# 有人把这两个转发删掉了 —— 精简构建是过了，但完整模块的百度从此完全没反应
+# （日志里连 BMapClean 都不出现）。精简构建的正确做法是生成 no-op 桩类
+# （tools/build_variant.py 的 STUBS），不是把调用从共享源码里拿掉。
+#
+# 这里直接在 DEX 里查类型描述符，编译期就把它钉死。
+$dexText = [System.Text.Encoding]::GetEncoding(28591).GetString(
+    [System.IO.File]::ReadAllBytes("$src\build\dex\classes.dex"))
+foreach ($symbol in @("Lio/github/ldxm666/bmapclean/MainHook;",
+                      "Lio/github/ldxm666/bmapclean/App;",
+                      "Lio/github/ldxm666/tmapclean/MainHook;",
+                      "Lio/github/ldxm666/tmapclean/App;",
+                      "Lio/github/ldxm666/mapadkiller/TmapHooks;")) {
+    if (-not $dexText.Contains($symbol)) {
+        throw "dispatcher regression: $symbol is not referenced any more - the corresponding map app would silently stop working"
+    }
+}
 
 Write-Host "[4/6] aapt2 compile+link, then add dex/META-INF"
 & "$Bt\aapt2.exe" compile --dir "$src\res" -o "$src\build\res.zip" > "$src\build\aapt2c.log" 2>&1
@@ -109,6 +139,6 @@ Write-Host "[6/6] dist"
 New-Item -ItemType Directory -Force -Path $Out | Out-Null
 New-Item -ItemType Directory -Force -Path $Rel | Out-Null
 Copy-Item "$src\build\out\BMapClean.apk" "$Out\BMapClean.apk" -Force
-Copy-Item "$src\build\out\BMapClean.apk" "$Rel\MapClean-lsp-v2.1.2.apk" -Force
-Get-Item "$Rel\MapClean-lsp-v2.1.2.apk" | Select-Object FullName,Length
+Copy-Item "$src\build\out\BMapClean.apk" "$Rel\$LspName" -Force
+Get-Item "$Rel\$LspName" | Select-Object FullName,Length
 Write-Host "BUILD OK src=$src"

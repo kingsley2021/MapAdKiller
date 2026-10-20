@@ -118,7 +118,13 @@ public final class AmapProtocolHooks {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                 Object result = chain.proceed();
                 if (!(result instanceof JSONObject)) return result;
-                try { return AmapData.toolbox((JSONObject) result, AmapData.CURRENT); }
+                try {
+                    // fill=true: this is the payload the home toolbar actually renders, and it
+                    // is the only place where switching a tool on may ADD a cell.
+                    JSONObject out = AmapData.toolbox((JSONObject) result, AmapData.CURRENT, true);
+                    if (out != (Object) result) H.log("amap_tool_boot slots=" + AmapData.slotIds(out));
+                    return out;
+                }
                 catch (Exception e) { diagnose("tool_boot", e); return result; }
             }
         });

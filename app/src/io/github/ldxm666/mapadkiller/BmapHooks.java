@@ -8,6 +8,8 @@ import android.view.View;
 import android.view.ViewGroup;
 
 import java.lang.reflect.Method;
+import java.util.ArrayList;
+import java.util.List;
 
 import io.github.libxposed.api.XposedInterface;
 
@@ -133,9 +135,11 @@ public final class BmapHooks {
             H.log(Log.INFO, MainHook.TAG, "BMAP splash addView hooked on " + svc.getName());
         }
 
-        // ---- ④ 三方 ADN 加载入口：**只观察，绝不吞** ----
-        // 反编译实证：IAdLoader.I(...) 是 ADN 的**回调完成方法**（onAdClose/onTimeOver…），
-        // 吞掉它 = 回调永不到达 = 卡开屏。整条链路一律 observe。
+        // ---- ④ 三方 ADN 回调观测 ----
+        // ⚠ 本类是 22.0.x 时代的开屏方案，当前**没有被任何入口调用**：
+        // bmapclean.MainHook.onPackageReady 走的是 bmapclean.BaiduHooks。
+        // 百度广告 SDK 的实际拦截已并入 bmapclean/BaiduSdkBlock.java（按前缀
+        // 自动发现全部 loader + BMAd provider），这里保留原文以免两份逻辑漂移。
         String[] loaders = {
             P + "commonadprovider.api.IAdLoader",
             P + "commonadprovider.business.BusinessAdLoader",
@@ -153,7 +157,8 @@ public final class BmapHooks {
                     H.observe(ln + ".I()"));
         }
 
-        // ---- ⑤ BMAd 开放封装 ----
+        // ---- ⑤ BMAd 开放封装（百度广告开放平台接口层）----
+        // 与 ④ 同样：实际生效的实现在 bmapclean/BaiduSdkBlock.java。
         String[] bmad = {
             P + "ad.BMAdSplashProvider",
             P + "ad.BMAdNativeProvider",
@@ -310,7 +315,7 @@ public final class BmapHooks {
     /**
      * 探测 + 隐藏：命中 AD SDK 特征则对整棵新增子树 GONE，否则放行（品牌层不动）。
      *
-     * v1.1.0 改为**帧驱动**：广告内容往往是 addView 之后才异步填进去的，
+     * <p>v1.1.0 改为**帧驱动**：广告内容往往是 addView 之后才异步填进去的，
      * 旧版靠固定的 16/40/90…700ms 七个 postDelayed，覆盖不到 >700ms 的填充；
      * 现在挂 OnPreDrawListener 连续探 60 帧（≈1s），命中即停。
      */
