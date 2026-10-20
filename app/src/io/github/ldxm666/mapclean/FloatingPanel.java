@@ -512,6 +512,12 @@ public final class FloatingPanel extends FrameLayout {
 
     /** 覆盖前给一次确认；确认后在后台线程写入，避免 commit() 卡住界面。 */
     private void confirmDefaults(final TextView anchor) {
+        // NONE 态下这个按钮只会静默失败，用户会以为"恢复了其实没有" —— 直接说清楚原因，
+        // 连确认框都不弹（弹了也没意义：确认完同样写不进去）。
+        if (FloatingConfig.backend() == FloatingConfig.BACKEND_NONE) {
+            toast("配置通道不可用：请在框架里确认本模块已对目标 App 启用，或重装模块");
+            return;
+        }
         try {
             new android.app.AlertDialog.Builder(context)
                     .setTitle("恢复默认配置？")
@@ -642,6 +648,22 @@ public final class FloatingPanel extends FrameLayout {
         statusPill.setTextSize(11.5f);
         statusPill.setPadding(UiKit.dp(context, 8), UiKit.dp(context, 3),
                 UiKit.dp(context, 8), UiKit.dp(context, 3));
+        // The pill can only hold a short phrase; the actionable explanation lives on long-press
+        // (a NONE pill that just says 「只读」 leaves the user with nothing to do).
+        statusPill.setOnLongClickListener(new OnLongClickListener() {
+            @Override public boolean onLongClick(View v) {
+                if (FloatingConfig.backend() == FloatingConfig.BACKEND_NONE) {
+                    toast("配置通道不可用：请在框架里确认本模块已对目标 App 启用，或重装模块");
+                } else if (FloatingConfig.lastWriteState() == FloatingConfig.W_REFUSED) {
+                    toast("配置无法保存：请检查存储空间或重装模块");
+                } else {
+                    toast("配置后端：" + (FloatingConfig.backend()
+                            == FloatingConfig.BACKEND_REMOTE ? "远程（框架服务）" : "本地")
+                            + "；当前版本 v" + Version.NAME);
+                }
+                return true;
+            }
+        });
         meta.addView(statusPill);
         refreshStatus();
 
@@ -740,15 +762,13 @@ public final class FloatingPanel extends FrameLayout {
      */
     private String writeFailedHint() {
         FloatingConfig.ensureServiceFrom(context);
-        if (FloatingConfig.writePath() == FloatingConfig.WRITE_NONE) {
+        if (FloatingConfig.backend() == FloatingConfig.BACKEND_NONE) {
             FloatingConfig.reportNoWritePath("write");
-            return "当前无法写入：请在高德运行中打开本面板";
+            return "配置通道不可用：请在框架里确认本模块已对目标 App 启用，或重装模块";
         }
-        String reason = FloatingConfig.lastWriteReason();
-        if ("commit_false".equals(reason) || "io".equals(reason)) {
-            return "配置库不可写：请重装本模块或清除目标 App 数据后再试";
-        }
-        return "写入失败，请再试一次";
+        // A backend exists, so the refusal is a real storage/permission problem
+        // (commit_false / io / prefs_null / no_backend all end up here).
+        return "配置无法保存：请检查存储空间或重装模块";
     }
 
     /**
@@ -785,32 +805,34 @@ public final class FloatingPanel extends FrameLayout {
     }
 
     private void refreshStatus() {
-        int path = FloatingConfig.writePath();
+        int backend = FloatingConfig.backend();
         boolean refused = FloatingConfig.lastWriteState() == FloatingConfig.W_REFUSED;
-        if (path == FloatingConfig.WRITE_NONE) {
-            statusPill.setText("○ 只读 · 需要目标 App 运行中");
+        if (backend == FloatingConfig.BACKEND_NONE) {
+            // 「需要目标 App 运行中」 was self-contradictory here: the sheet IS inside the target
+            // app. Say what is actually wrong, not where the user supposedly is.
+            statusPill.setText("○ 只读 · 无法写入配置");
             statusPill.setTextColor(cDotBad());
             statusPill.setBackground(UiKit.plate(dark ? 0x26FF6B70 : 0x1AE5484D,
                     UiKit.dpf(context, 20f)));
             FloatingConfig.reportNoWritePath("status");
         } else if (refused) {
-            // Connected but the last write was refused (permissions / IO / read-only proxy).
+            // A backend exists but the last write was refused (permissions / IO / disk full).
             // Saying 「可写入」 here is what sent the user chasing the wrong cause.
-            statusPill.setText(path == FloatingConfig.WRITE_SVC
-                    ? "● 已连接 · 写入被拒" : "● 进程内 · 写入被拒");
+            statusPill.setText(backend == FloatingConfig.BACKEND_REMOTE
+                    ? "● 已连接 · 写入被拒" : "● 本地 · 写入被拒");
             statusPill.setTextColor(cWarn());
             statusPill.setBackground(UiKit.plate(dark ? 0x26FFB020 : 0x1AF79009,
                     UiKit.dpf(context, 20f)));
-        } else if (path == FloatingConfig.WRITE_SVC) {
+        } else if (backend == FloatingConfig.BACKEND_REMOTE) {
             statusPill.setText("● 已连接 · 可写入");
             statusPill.setTextColor(cDotOk());
             statusPill.setBackground(UiKit.plate(dark ? 0x262BD88A : 0x1A12B76A,
                     UiKit.dpf(context, 20f)));
         } else {
-            // No framework service, but H.module's preferences are writable in this process --
-            // the normal state of the 免 root 内置 build. Calling that 「服务未连接」 was a lie:
-            // the taps worked, only the label said they could not.
-            statusPill.setText("● 可写入（进程内）");
+            // Local SharedPreferences backend: writable in-process, no framework channel
+            // needed. This is the state the 免 root build falls back to on devices where the
+            // remote channel never arrives.
+            statusPill.setText("● 可写入（本地）");
             statusPill.setTextColor(cAccent());
             statusPill.setBackground(UiKit.plate(dark ? 0x267AB1FF : 0x140A6CF5,
                     UiKit.dpf(context, 20f)));
@@ -843,6 +865,7 @@ public final class FloatingPanel extends FrameLayout {
         if ("io".equals(reason)) return "读写出错";
         if ("prefs_null".equals(reason)) return "配置库不可用";
         if ("svc_null".equals(reason)) return "服务未就绪";
+        if ("no_backend".equals(reason)) return "配置通道不可用";
         return reason;
     }
 

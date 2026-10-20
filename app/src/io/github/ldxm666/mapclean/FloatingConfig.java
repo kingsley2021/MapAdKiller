@@ -180,7 +180,7 @@ public final class FloatingConfig {
 
     /** No writable path at all (neither the service nor the module's own preferences). */
     public static final int WRITE_NONE = 0;
-    /** No service, but {@code Config.prefs()} is reachable -- writable in the embedded build. */
+    /** No framework service, but {@code Config} has a local backend -- writable in-process. */
     public static final int WRITE_PREFS = 1;
     /** The framework service is bound: writable in every build. */
     public static final int WRITE_SVC = 2;
@@ -206,6 +206,31 @@ public final class FloatingConfig {
     /** True when a writable path is currently available. */
     public static boolean writable() {
         return writePath() > 0;
+    }
+
+    /** No backend at all (mirrors {@code Config.BACKEND_NONE}). */
+    public static final int BACKEND_NONE = io.github.ldxm666.mapadkiller.Config.BACKEND_NONE;
+    /** Local in-process backend: writable without any framework channel. */
+    public static final int BACKEND_LOCAL = io.github.ldxm666.mapadkiller.Config.BACKEND_LOCAL;
+    /** Framework remote-preferences backend (service bound). */
+    public static final int BACKEND_REMOTE = io.github.ldxm666.mapadkiller.Config.BACKEND_REMOTE;
+
+    /**
+     * The configuration backend actually in use, after verification.
+     *
+     * <p>{@code NONE} is never reported on a static verdict alone -- the vendor panel probes it
+     * with one real write first, because a stale NONE is exactly what told users 「只读」 while
+     * the sheet was running inside the target app.
+     */
+    public static int backend() {
+        try {
+            if (Vendor.tmap() || Vendor.baidu()) {
+                return App.service() != null ? BACKEND_REMOTE : BACKEND_NONE;
+            }
+            return AmapPanel.effectiveBackend();
+        } catch (Throwable t) {
+            return BACKEND_NONE;
+        }
     }
 
     /** Nothing written yet in this process. */

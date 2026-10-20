@@ -220,12 +220,14 @@ final class AmapPanel {
             } catch (Throwable ignored) {}
         }
         try {
-            android.content.SharedPreferences.Editor editor = Config.prefs().edit();
-            for (String key : POWER_ALL_KEYS) editor.putBoolean(key, true);
-            if (editor.commit()) {
-                markWrite(true, null);
-                invalidate();
-                return POWER_ALL_KEYS.length;
+            android.content.SharedPreferences.Editor editor = Config.edit();
+            if (editor != null) {
+                for (String key : POWER_ALL_KEYS) editor.putBoolean(key, true);
+                if (editor.commit()) {
+                    markWrite(true, null);
+                    invalidate();
+                    return POWER_ALL_KEYS.length;
+                }
             }
         } catch (Throwable ignored) {}
         markWrite(false, R_COMMIT_FALSE);
@@ -276,24 +278,123 @@ final class AmapPanel {
     /**
      * Which write path is currently usable.
      *
-     * <p>2 = the LSPatch/LSPosed service is bound (writable in every build); 1 = no service,
-     * but this process can <b>actually commit</b> to the module's own preferences (probed
-     * once, see {@link #prefsWritable()}); 0 = neither, which is the state the user sees as
-     * 「只读」.
-     *
-     * <p>Reachability is not writability: {@code Config.prefs()} can hand back a read-only
-     * proxy in a hooked process, so answering 1 from {@code prefs() != null} would put the pill
-     * back to lying -- just in the optimistic direction this time.
+     * <p>2 = the framework service ({@code WRITE_SVC}); 1 = a local in-process backend
+     * ({@code WRITE_PREFS}); 0 = neither.
      */
     static int writePath() {
-        try {
-            if (io.github.ldxm666.mapadkiller.App.svc() != null) return 2;
-        } catch (Throwable ignored) {}
-        return prefsWritable() ? 1 : 0;
+        switch (effectiveBackend()) {
+            case BACKEND_REMOTE: return 2;
+            case BACKEND_LOCAL: return 1;
+            default: return 0;
+        }
     }
 
-    /** -1 = not probed yet, 1 = commit works, 0 = commit refused. One probe per process. */
-    private static volatile int prefsProbe = -1;
+    /* ------------------------------------------------ 配置后端（对齐 amap-core2） */
+
+    /** No backend at all: nothing can be read or written (mirrors {@code Config.BACKEND_NONE}). */
+    static final int BACKEND_NONE = Config.BACKEND_NONE;
+    /** Local SharedPreferences backend: works in-process, no framework channel needed. */
+    static final int BACKEND_LOCAL = Config.BACKEND_LOCAL;
+    /** Framework remote-preferences backend (the service is bound). */
+    static final int BACKEND_REMOTE = Config.BACKEND_REMOTE;
+
+    /**
+     * {@code Config.backend()} -- {@code amap-core2} 的最终 API（L288）。
+     *
+     * <p>早前这里用反射，是因为那个接口还没落地、名字也没定；现在它是正式接口，直接调。
+     */
+    private static int configBackend() {
+        try {
+            return Config.backend();
+        } catch (Throwable t) {
+            return BACKEND_NONE;
+        }
+    }
+
+    /** -1 = not probed, 0 = refused, 1 = the probe write landed. One probe per process. */
+    private static volatile int probeState = -1;
+
+    /** Harmless key used by the probe; written and removed immediately. */
+    private static final String K_PROBE = "_probe";
+
+    /**
+     * Prove writability with one real write instead of trusting a static verdict.
+     *
+     * <p>Tries both channels (service, then in-process preferences), removes the key again, and
+     * logs exactly one line: {@code event=cfg_probe ok|fail backend=… reason=…}. This is what
+     * keeps the pill honest when {@code Config.backend()} answers NONE on a device where a
+     * write would actually succeed.
+     */
+    static boolean probeWritable() {
+        int known = probeState;
+        if (known >= 0) return known == 1;
+        boolean ok = false;
+        String reason = "no_channel";
+        XposedService service = null;
+        try { service = io.github.ldxm666.mapadkiller.App.svc(); } catch (Throwable ignored) {}
+        if (service != null) {
+            try {
+                android.content.SharedPreferences.Editor e =
+                        service.getRemotePreferences(Config.PREF_GROUP).edit();
+                e.putLong(K_PROBE, System.currentTimeMillis());
+                if (e.commit()) {
+                    ok = true;
+                    try {
+                        service.getRemotePreferences(Config.PREF_GROUP)
+                                .edit().remove(K_PROBE).commit();
+                    } catch (Throwable ignored) {}
+                } else {
+                    reason = "svc_commit_false";
+                }
+            } catch (Throwable t) {
+                reason = "svc_" + t.getClass().getSimpleName();
+            }
+        } else {
+            reason = "svc_null";
+        }
+        if (!ok) {
+            try {
+                // Config.edit() is null when there is no backend at all -- that is the NONE
+                // case, not an error, so it must not throw.
+                android.content.SharedPreferences.Editor e = Config.edit();
+                if (e == null) {
+                    reason = "no_backend";
+                } else {
+                    e.putLong(K_PROBE, System.currentTimeMillis());
+                    if (e.commit()) {
+                        ok = true;
+                        try {
+                            android.content.SharedPreferences.Editor r = Config.edit();
+                            if (r != null) r.remove(K_PROBE).commit();   // 不留脏键
+                        } catch (Throwable ignored) {}
+                    } else {
+                        reason = "prefs_commit_false";
+                    }
+                }
+            } catch (Throwable t) {
+                reason = "prefs_" + t.getClass().getSimpleName();
+            }
+        }
+        probeState = ok ? 1 : 0;
+        int declared = configBackend();
+        Log.i(TAG_WRITE, "event=cfg_probe " + (ok ? "ok" : "fail")
+                + " backend=" + (declared < 0 ? "unknown" : String.valueOf(declared))
+                + (ok ? "" : " reason=" + reason));
+        return ok;
+    }
+
+    /**
+     * The backend to report, after verification.
+     *
+     * <p>NONE is never taken at face value: it is checked with one real write, and a successful
+     * write upgrades the answer to LOCAL. A stale NONE is exactly what told users 「只读」 while
+     * the sheet was sitting inside the target app.
+     */
+    static int effectiveBackend() {
+        int declared = configBackend();
+        if (declared == BACKEND_NONE) return probeWritable() ? BACKEND_LOCAL : BACKEND_NONE;
+        return declared;
+    }
 
     /* ------------------------------------------------ 最近一次写入结果（药丸着色用） */
 
@@ -312,10 +413,15 @@ final class AmapPanel {
     static final String R_PREFS_NULL = "prefs_null";
     static final String R_COMMIT_FALSE = "commit_false";
     static final String R_IO = "io";
+    /** No backend at all ({@code Config.BACKEND_NONE}): nothing to write through. */
+    static final String R_NO_BACKEND = "no_backend";
 
     private static void markWrite(boolean ok, String reason) {
         lastWrite = ok ? W_OK : W_REFUSED;
         lastWriteReason = ok ? null : reason;
+        // A successful write proves a backend exists -- upgrade a stale "no channel" verdict
+        // so the pill cannot keep saying 只读 after the channel came back.
+        if (ok) probeState = 1;
     }
 
     /** {@link #W_UNTRIED} / {@link #W_OK} / {@link #W_REFUSED}. */
@@ -328,29 +434,13 @@ final class AmapPanel {
         return lastWriteReason;
     }
 
-    /** Sentinel key used by the probe; removed again immediately when the probe succeeds. */
-    private static final String K_WRITE_PROBE = "_write_probe";
-
     /**
-     * True when this process can really commit to the module's preferences.
-     *
-     * <p>Probed with a single write/remove pair, once per process: in the 免 root 内置 build the
-     * host process owns the module instance and commits work, while a plain LSPosed hooked
-     * process only gets a read-only view and every {@code commit()} returns false.
+     * Kept as a thin alias for older call sites: the real check is now
+     * {@link #probeWritable()}, which also tries the service channel and uses the {@code _probe}
+     * key the lead specified. Two probes writing two different keys was just clutter.
      */
     static boolean prefsWritable() {
-        int known = prefsProbe;
-        if (known >= 0) return known == 1;
-        boolean ok = false;
-        try {
-            if (Config.prefs().edit().putBoolean(K_WRITE_PROBE, true).commit()) {
-                ok = true;
-                try { Config.prefs().edit().remove(K_WRITE_PROBE).commit(); } catch (Throwable ignored) {}
-            }
-        } catch (Throwable ignored) {}
-        prefsProbe = ok ? 1 : 0;
-        Log.i(TAG_WRITE, "event=cfg_prefs_probe writable=" + ok);
-        return ok;
+        return probeWritable();
     }
 
     /** True when a writable path is currently available. */
@@ -393,9 +483,9 @@ final class AmapPanel {
      * <p>Two paths, in this order, and <b>both are tried</b>:
      * <ol>
      *   <li>the framework service ({@code App.svc()}) -- writable in every build;</li>
-     *   <li>{@code Config.prefs()} = {@code H.module.getRemotePreferences(...)} -- writable
-     *       when this process owns the module instance (the 免 root 内置 build), which is why
-     *       a missing service must not be the end of the story.</li>
+     *   <li>{@code Config.put(...)} -- the local backend {@code amap-core2} added, which needs no
+     *       framework channel at all and is therefore the path that works when the remote
+     *       preferences never arrive (returns false when {@code Config.BACKEND_NONE}).</li>
      * </ol>
      * Every branch logs unconditionally: a switch that refuses to flip is a user-visible
      * failure, and 「服务未连接」 alone cannot say which of the two paths died.
@@ -424,17 +514,17 @@ final class AmapPanel {
                     + moduleState() + " stage=svc reason=" + R_SVC_NULL);
         }
         try {
-            if (Config.prefs().edit().putBoolean(key, value).commit()) {
+            if (Config.put(key, value)) {
                 markWrite(true, null);
                 Log.i(TAG_WRITE, "event=cfg_write_ok key=" + key + " via=prefs");
                 apply(key);
                 return true;
             }
-            markWrite(false, R_COMMIT_FALSE);
+            String reason = configBackend() == BACKEND_NONE ? R_NO_BACKEND : R_COMMIT_FALSE;
+            markWrite(false, reason);
             Log.w(TAG_WRITE, "event=cfg_write_fail key=" + key + " svc=" + svcState(service)
-                    + " module=" + moduleState() + " stage=prefs reason=" + R_COMMIT_FALSE);
+                    + " module=" + moduleState() + " stage=prefs reason=" + reason);
         } catch (Throwable t) {
-            // H.module == null throws NPE; a dead binder throws the rest.
             String reason = (t instanceof NullPointerException) ? R_PREFS_NULL : R_IO;
             markWrite(false, reason);
             Log.w(TAG_WRITE, "event=cfg_write_fail key=" + key + " svc=" + svcState(service)
@@ -479,7 +569,8 @@ final class AmapPanel {
      */
     static int readInt(String key, int fallback) {
         try {
-            return Config.prefs().getInt(key, fallback);
+            // Config.getInt 自己处理"后端不可用"（返回 fallback，不抛），比直接摸 prefs 稳。
+            return Config.getInt(key, fallback);
         } catch (Throwable t) {
             return fallback;
         }
@@ -518,15 +609,16 @@ final class AmapPanel {
                     + moduleState() + " stage=svc reason=" + R_SVC_NULL);
         }
         try {
-            if (Config.prefs().edit().putInt(key, value).commit()) {
+            if (Config.put(key, value)) {
                 markWrite(true, null);
                 Log.i(TAG_WRITE, "event=cfg_write_ok key=" + key + " via=prefs");
                 invalidate();
                 return true;
             }
-            markWrite(false, R_COMMIT_FALSE);
+            String reason = configBackend() == BACKEND_NONE ? R_NO_BACKEND : R_COMMIT_FALSE;
+            markWrite(false, reason);
             Log.w(TAG_WRITE, "event=cfg_write_fail key=" + key + " svc=" + svcState(service)
-                    + " module=" + moduleState() + " stage=prefs reason=" + R_COMMIT_FALSE);
+                    + " module=" + moduleState() + " stage=prefs reason=" + reason);
         } catch (Throwable t) {
             String reason = (t instanceof NullPointerException) ? R_PREFS_NULL : R_IO;
             markWrite(false, reason);

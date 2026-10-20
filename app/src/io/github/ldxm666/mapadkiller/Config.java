@@ -214,7 +214,11 @@ public final class Config {
      * The embedded panel writes through the same preferences it reads, and without this
      * the UI would keep showing the previous value for up to two seconds.
      */
-    public static void invalidate() { expiresAt = 0; }
+    public static void invalidate() {
+        expiresAt = 0;
+        // 写入后立刻刷新热键 Flag，避免"改了开关但拦截器还读旧值"。
+        refreshFlags();
+    }
     private static String[] toolLabels() {
         String[] out = new String[AmapData.TOOLS.length];
         for (int i = 0; i < out.length; i++) out[i] = AmapData.TOOLS[i][1];
@@ -240,15 +244,201 @@ public final class Config {
     }
     public static SharedPreferences prefs() {
         SharedPreferences p = cached;
-        if (p == null) synchronized (Config.class) {
+        if (p != null) return p;
+        synchronized (Config.class) {
             p = cached;
-            if (p == null) {
-                p = H.module.getRemotePreferences(PREF_GROUP);
-                p.registerOnSharedPreferenceChangeListener(listener);
-                cached = p;
+            if (p != null) return p;
+            p = resolveBackend();
+            cached = p;
+            if (p != null) {
+                try { p.registerOnSharedPreferenceChangeListener(listener); } catch (Throwable ignored) { }
             }
+            if (!backendLogged) {
+                backendLogged = true;
+                // 只打一次（remote / local / none 之一），供面板与排障判读。
+                H.log("event=cfg_backend " + backendName());
+            }
+            return p;
         }
-        return p;
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 配置后端：远程（框架）→ 本地（宿主 SharedPreferences）→ 无
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // 为什么需要：`H.module.getRemotePreferences(PREF_GROUP)` 依赖框架提供远程配置通道。
+    // 在**免 root 内置（LSPatch）**形态下，部分设备/版本上 `H.module` 为 null，或该方法
+    // 返回 null / 抛异常 ⇒ 读写全废；而所有读都有 defaultVisible 兜底 ⇒ 界面表现为
+    // 「○ 只读 · 需要目标 App 运行中」+ 全部显示默认值（"开关能显示"是假象）。
+    //
+    // 优先级：远程有就用远程（LSPosed 用户的配置不丢）；否则用**同进程内的普通
+    // SharedPreferences**（永远可写，hook 侧与面板侧读的是同一个文件）；都没有才只读。
+
+    public static final int BACKEND_NONE = 0;
+    public static final int BACKEND_LOCAL = 1;
+    public static final int BACKEND_REMOTE = 2;
+    /** 本地兜底后端文件名。**不要改**：面板与 hook 必须读同一个文件。 */
+    public static final String LOCAL_PREFS = "mapclean_cfg";
+    private static final String K_LOCAL_MIGRATED = "_local_migrated";
+
+    private static volatile int backend = -1;        // -1 = 未解析
+    private static volatile boolean backendLogged;
+
+    /** 当前后端：{@link #BACKEND_REMOTE} / {@link #BACKEND_LOCAL} / {@link #BACKEND_NONE}。 */
+    public static int backend() {
+        prefs();
+        int b = backend;
+        return b < 0 ? BACKEND_NONE : b;
+    }
+
+    private static SharedPreferences resolveBackend() {
+        SharedPreferences remote = remotePrefs();
+        SharedPreferences local = localPrefs();
+        if (remote != null) {
+            backend = BACKEND_REMOTE;
+            // 顺手把远程值播种到本地一次：将来远程不可用时配置不会"消失"。
+            seedLocal(remote, local);
+            return remote;
+        }
+        if (local != null) {
+            backend = BACKEND_LOCAL;
+            return local;
+        }
+        backend = BACKEND_NONE;
+        return null;
+    }
+
+    private static SharedPreferences remotePrefs() {
+        try {
+            if (H.module == null) return null;          // 免 root 形态下这里就是 null
+            return H.module.getRemotePreferences(PREF_GROUP);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static SharedPreferences localPrefs() {
+        try {
+            android.content.Context ctx = hostContext();
+            if (ctx == null) return null;
+            return ctx.getSharedPreferences(LOCAL_PREFS, android.content.Context.MODE_PRIVATE);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /**
+     * 宿主进程的 Context —— **不依赖框架**。
+     *
+     * <p>先走 {@code android.app.ActivityThread.currentApplication()}（任何进程里都能拿到本进程的
+     * Application，纯反射、不碰框架 API）；拿不到再试 {@code io.github.ldxm666.mapclean.App.ctx()}
+     * （内置版里由面板侧持有的实例）。两条都用反射 ⇒ 不引入对 mapclean 的编译期依赖，
+     * 精简构建里也不会缺符号。
+     */
+    private static android.content.Context hostContext() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Object app = at.getMethod("currentApplication").invoke(null);
+            if (app instanceof android.content.Context) return (android.content.Context) app;
+        } catch (Throwable ignored) { }
+        try {
+            Class<?> app = Class.forName("io.github.ldxm666.mapclean.App");
+            Object ctx = app.getMethod("ctx").invoke(null);
+            if (ctx instanceof android.content.Context) return (android.content.Context) ctx;
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    /**
+     * 把远程配置播种到本地（一次性，标记 {@link #K_LOCAL_MIGRATED}）。
+     *
+     * <p>为什么在"远程可用"时做：远程不可用时已经读不到任何值，那时无从迁移。
+     * 真正会丢配置的场景是「现在远程好用 → 换设备/换框架后远程不可用」，
+     * 所以必须在远程**还能读**的时候先落一份到本地。
+     */
+    private static void seedLocal(SharedPreferences remote, SharedPreferences local) {
+        if (remote == null || local == null) return;
+        try {
+            if (local.getBoolean(K_LOCAL_MIGRATED, false)) return;
+            Map<String, ?> all = remote.getAll();
+            if (all == null || all.isEmpty()) return;
+            SharedPreferences.Editor e = local.edit();
+            int n = 0;
+            for (Map.Entry<String, ?> en : all.entrySet()) {
+                String k = en.getKey();
+                Object v = en.getValue();
+                if (k == null || v == null) continue;
+                if (v instanceof Boolean) e.putBoolean(k, (Boolean) v);
+                else if (v instanceof String) e.putString(k, (String) v);
+                else if (v instanceof Integer) e.putInt(k, (Integer) v);
+                else if (v instanceof Long) e.putLong(k, (Long) v);
+                else if (v instanceof Float) e.putFloat(k, (Float) v);
+                else continue;
+                n++;
+            }
+            e.putBoolean(K_LOCAL_MIGRATED, true);
+            e.commit();
+            if (n > 0) H.log("event=cfg_migrated n=" + n);
+        } catch (Throwable ignored) { }
+    }
+
+    private static String backendName() {
+        int b = backend;
+        return b == BACKEND_REMOTE ? "remote" : b == BACKEND_LOCAL ? "local" : "none";
+    }
+
+    /**
+     * **统一写入口**：面板与 hook 都必须走这里（写必须落在当前后端上）。
+     *
+     * @return null 表示当前没有可写后端（{@link #BACKEND_NONE}）
+     */
+    public static SharedPreferences.Editor edit() {
+        try {
+            SharedPreferences p = prefs();
+            return p == null ? null : p.edit();
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 写一个布尔键并立即 commit；成功返回 true。 */
+    public static boolean put(String key, boolean value) {
+        SharedPreferences.Editor e = edit();
+        if (e == null) return false;
+        boolean ok;
+        try { ok = e.putBoolean(key, value).commit(); } catch (Throwable t) { ok = false; }
+        if (ok) invalidate();
+        return ok;
+    }
+
+    /** 写一个字符串键并立即 commit；成功返回 true。 */
+    public static boolean put(String key, String value) {
+        SharedPreferences.Editor e = edit();
+        if (e == null) return false;
+        boolean ok;
+        try { ok = e.putString(key, value).commit(); } catch (Throwable t) { ok = false; }
+        if (ok) invalidate();
+        return ok;
+    }
+
+    /** 读 int（面板的滑块类配置用）；后端不可用时返回 fallback，绝不抛。 */
+    public static int getInt(String key, int fallback) {
+        try {
+            SharedPreferences p = prefs();
+            return p == null ? fallback : p.getInt(key, fallback);
+        } catch (Throwable t) {
+            return fallback;
+        }
+    }
+
+    /** 写 int 并立即 commit；成功返回 true。 */
+    public static boolean put(String key, int value) {
+        SharedPreferences.Editor e = edit();
+        if (e == null) return false;
+        boolean ok;
+        try { ok = e.putInt(key, value).commit(); } catch (Throwable t) { ok = false; }
+        if (ok) invalidate();
+        return ok;
     }
     private static Map<String, ?> currentValues() {
         long now = android.os.SystemClock.uptimeMillis();
@@ -264,7 +454,12 @@ public final class Config {
     public static boolean visible(String key) { return value(currentValues(), key); }
     public static boolean selected(String key) { return Boolean.TRUE.equals(currentValues().get(key)); }
     /** UI and hooks use the same default when the tool allowlist is active. */
-    public static boolean readVisible(SharedPreferences prefs, String key) { return value(prefs.getAll(), key); }
+    public static boolean readVisible(SharedPreferences prefs, String key) {
+        // prefs 可能是 null（BACKEND_NONE）—— 面板侧绝不能因此崩，退回默认值。
+        if (prefs == null) return defaultVisible(key);
+        try { return value(prefs.getAll(), key); }
+        catch (Throwable t) { return defaultVisible(key); }
+    }
     /** Same rule, but against an already-fetched map -- the settings page reads every
      *  key at once instead of copying the whole table once per switch. */
     public static boolean readVisible(java.util.Map<String, ?> values, String key) { return value(values, key); }
