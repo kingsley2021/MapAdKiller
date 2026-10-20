@@ -297,6 +297,10 @@ public final class FloatingPanel extends FrameLayout {
     private String updateLatest;
     /** The process-wide automatic check runs once, on the first open of the sheet. */
     private boolean updateAutoChecked;
+    /** A check is in flight; guards against a second round that would never get a callback. */
+    private boolean updateInFlight;
+    /** Hard cap on the 「检查中…」 state: UpdateChecker's own deadline is 12s, this is the net. */
+    private static final long WATCHDOG_MS = 13000L;
 
     private TextView versionChip;
     private TextView versionBadge;
@@ -896,6 +900,9 @@ public final class FloatingPanel extends FrameLayout {
                     openUrl(Version.RELEASES);
                     return;
                 }
+                if (updateState == U_FAILED) {
+                    Log.i(TAG, "event=update_check_retry");
+                }
                 startUpdateCheck(true);
             }
         });
@@ -1040,12 +1047,34 @@ public final class FloatingPanel extends FrameLayout {
      * false, so the 6-hour throttle inside {@code UpdateChecker} still applies.
      */
     private void startUpdateCheck(final boolean userInitiated) {
+        // 已经有一轮在跑（可能是 App 侧 maybeAutoCheck 起的）：不要再把自己置成 U_CHECKING ——
+        // UpdateChecker 的 sRunning 会直接 return，回调永远不会来，界面就永远停在「检查中」。
+        if (updateInFlight || UpdateChecker.isChecking()) {
+            if (userInitiated) {
+                toast("正在检查…");
+                Log.i(TAG, "event=update_check_busy");
+            }
+            return;
+        }
+        updateInFlight = true;
         updateState = U_CHECKING;
         paintUpdate();
+        // 看门狗：即使 UpdateChecker 内部异常导致回调没来，也必须强制落到终态。
+        // 「U_CHECKING 绝不能成为最终可见状态」是这条的硬约束。
+        postDelayed(new Runnable() {
+            @Override public void run() {
+                if (!updateInFlight || updateState != U_CHECKING) return;
+                updateInFlight = false;
+                updateState = resolveFromCache();
+                paintUpdate();
+                Log.w(TAG, "event=update_check_watchdog state=" + updateState);
+            }
+        }, WATCHDOG_MS);
         try {
             UpdateChecker.check(context, userInitiated, new UpdateChecker.Callback() {
                 @Override public void onResult(String latest, boolean outdated, String source) {
                     // Already on the main thread (UpdateChecker posts through its Handler).
+                    updateInFlight = false;
                     updateLatest = latest;
                     updateState = latest == null ? U_FAILED : (outdated ? U_NEW : U_LATEST);
                     paintUpdate();
@@ -1055,8 +1084,20 @@ public final class FloatingPanel extends FrameLayout {
                 }
             });
         } catch (Throwable t) {
+            updateInFlight = false;
             updateState = U_FAILED;
             paintUpdate();
+        }
+    }
+
+    /** Terminal state derived from the cache alone -- used by the watchdog. */
+    private int resolveFromCache() {
+        try {
+            String latest = UpdateChecker.latest(context);
+            if (latest == null) return U_FAILED;
+            return UpdateChecker.isOutdated(context) ? U_NEW : U_LATEST;
+        } catch (Throwable t) {
+            return U_FAILED;
         }
     }
 

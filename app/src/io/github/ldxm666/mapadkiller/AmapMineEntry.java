@@ -9,7 +9,10 @@ import android.view.ViewParent;
 import android.widget.FrameLayout;
 
 import java.lang.ref.WeakReference;
+import java.util.Collections;
+import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Set;
 
 import io.github.libxposed.api.XposedInterface;
 import io.github.ldxm666.mapclean.FloatingPanel;
@@ -65,8 +68,21 @@ public final class AmapMineEntry {
      * <p>⚠️ 用这个开关做 A/B 之后**必须改回 false**：本轮的「改了没反应」就是它被留在 true 造成的。
      */
     private static final String K_MINE_ENTRY_OFF = "mine_entry_off";
-    /** 「我的」tab 的文案（长按判定用）。 */
-    private static final String LABEL_MINE = "我的";
+    /**
+     * 「我的」tab 的**可接受文案集合**。
+     *
+     * <p>★ 真机 r21 阻断性 bug：**未登录时高德把 tab 文案渲染成「未登录」**
+     * （`TextView t='未登录' rid='tab_name_v2'`），只认「我的」会让**所有全新安装 / 未登录用户
+     * 100% 打不开面板**。所以判据必须是不依赖单一文案的集合 + 身份判定。
+     */
+    private static final String[] MINE_LABELS = { "我的", "未登录", "我的 ", "My" };
+    /** 已知的「非我的」tab 文案：末位兜底判据先排除它们，避免误弹。 */
+    private static final String[] OTHER_LABELS = {
+            "首页", "探索", "工具", "内容", "地图", "打车", "长按说话", "附近", "消息", "我的位置"
+    };
+    /** `mine_tab_probe` 去重：每个 `label|via` 只打一次，最多 32 条。 */
+    private static final Set<String> SEEN_LABELS =
+            Collections.synchronizedSet(new LinkedHashSet<String>());
     /** 按住多久算长按。 */
     private static final long TAB_LONG_PRESS_MS = 700L;
 
@@ -79,6 +95,9 @@ public final class AmapMineEntry {
     /** 当前这一次按下的状态（长按自触发用）。 */
     private static volatile long tabDownAt;
     private static volatile boolean tabFired;
+    /** DOWN 那一刻就判好的「是不是我的 tab」+ 命中的判据（供 750ms 后自触发直接读）。 */
+    private static volatile boolean tabDownMine;
+    private static volatile String matchVia = "none";
     private static volatile WeakReference<View> tabDownView =
             new WeakReference<View>(null);
 
@@ -148,14 +167,20 @@ public final class AmapMineEntry {
             try {
                 MotionEvent event = null;
                 View touched = null;
+                Object model = null;
                 List<Object> args = chain.getArgs();
                 if (args != null) {
                     for (int i = 0; i < args.size() && i < 4; i++) {
                         Object a = args.get(i);
+                        if (a == null) continue;
                         if (event == null && a instanceof MotionEvent) {
                             event = (MotionEvent) a;
                         } else if (touched == null && a instanceof View) {
                             touched = (View) a;
+                        } else if (model == null && !(a instanceof MotionEvent)
+                                && !(a instanceof View)) {
+                            // dispatchTabTouchEvent(tab, View, MotionEvent) 的第 1 个参数 = tab 模型
+                            model = a;
                         }
                     }
                 }
@@ -165,6 +190,9 @@ public final class AmapMineEntry {
                     tabDownAt = android.os.SystemClock.uptimeMillis();
                     tabDownView = new WeakReference<View>(touched);
                     tabFired = false;
+                    // ★ 判定放在 DOWN 这一刻做：此时 tab 模型对象和 View 都拿得到。
+                    // 750ms 之后自触发时只读结果（那时可能已经拿不到模型了）。
+                    tabDownMine = matchMine(touched, model);
                     if (touched != null) {
                         final WeakReference<View> ref = new WeakReference<View>(touched);
                         touched.postDelayed(new Runnable() {
@@ -201,12 +229,18 @@ public final class AmapMineEntry {
     };
 
     /**
-     * tab 点击钩子：① 长按刚弹过面板 ⇒ **吞掉这一次点击**（页面不切走）；
-     * ② 其余情况只清掉待触发的长按状态（轻点一下不该弹面板）。
+     * tab 点击钩子。
      *
-     * <p>吞点击用「不调用 {@code chain.proceed()} 并返回 {@code Boolean.TRUE}」——
-     * 与本仓库 `AmapTabLayout` 对 {@code dispatchTabTouchEvent} 的既有写法一致
-     * （那里是 `return visible(...) ? chain.proceed() : true;`），不引入新的返回类型风险。
+     * <p>⚠️ **绝不能再短路**（r22 教训）：上一版在长按后「吞掉」这一次点击（不调用
+     * {@code chain.proceed()}，直接返回 {@code Boolean.TRUE}），结果 **首次长按之后 tab 栏整体失效**
+     * —— 连续 6 次长按连 {@code dispatchTabTouchEvent} 都不再进我的钩子。
+     *
+     * <p>原因：libxposed 的 hook 链是**串联**的。某个钩子不调用 {@code chain.proceed()}，
+     * 就等于把排在它后面的**所有**钩子一起短路（包括 {@code AmapTabLayout} 自己对 tab 状态的
+     * 记账）。宿主 tab 状态机从此不完整，后续触摸被它自己吞掉 —— 表现为「入口死掉」。
+     *
+     * <p>所以这里恢复成「永远 {@code proceed()}」，只在日志里记录「这次点击是长按之后跟来的」。
+     * 代价是页面会顺带切到「我的」，但**远小于「入口整体失效」**。
      */
     private static final XposedInterface.Hooker TAB_CLICK = new XposedInterface.Hooker() {
         @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
@@ -214,29 +248,33 @@ public final class AmapMineEntry {
                 long at = swallowAt;
                 if (swallowNextClick && at != 0L
                         && android.os.SystemClock.uptimeMillis() - at < SWALLOW_WINDOW_MS) {
-                    swallowNextClick = false;
-                    swallowAt = 0L;
-                    tabDownAt = 0L;
-                    tabDownView = new WeakReference<View>(null);
-                    H.log("event=mine_entry_click_swallowed");
-                    return Boolean.TRUE;      // 不 proceed ⇒ 这一次点击不再切 tab
+                    H.log("event=mine_entry_click_after_long_press");
                 }
             } catch (Throwable ignored) { }
-            Object result = chain.proceed();
-            try {
-                tabDownAt = 0L;
-                tabDownView = new WeakReference<View>(null);
-            } catch (Throwable ignored) { }
-            return result;
+            // 一次点击结束：长按计时与「跟随点击」标记都不该跨次存活。
+            swallowNextClick = false;
+            swallowAt = 0L;
+            tabDownAt = 0L;
+            tabDownView = new WeakReference<View>(null);
+            return chain.proceed();
         }
     };
 
     /** 长按真正触发点。 */
     private static void onTabLongPress(View down, long held) {
-        boolean mine = looksLikeMineTab(down);
+        boolean mine = tabDownMine;
+        String label = textOf(down);
         H.log("event=mine_entry_long_press held=" + held + " mine=" + mine
+                + " via=" + matchVia + " label=" + label
                 + " view=" + down.getClass().getSimpleName());
-        if (!mine) return;
+        if (!mine) {
+            // ★ 负向判据：**不去重、无条件打**。放在这里而不是 matchMine 里，是因为
+            // matchMine 在**每次 ACTION_DOWN** 都会跑（轻点也跑），在那里打会刷屏；
+            // 而「长按了非我的 tab」是低频事件，正是验证末位兜底是否写宽的证据。
+            H.log("event=mine_tab_miss label=" + label + " via=none"
+                    + " view=" + down.getClass().getSimpleName());
+            return;
+        }
         // ① 按「同一窗口」找浮层开面板（不碰 Activity）
         boolean near = false;
         try {
@@ -327,21 +365,121 @@ public final class AmapMineEntry {
         }
     }
 
-    /** 按下的是不是「我的」tab（只看局部文本，最多上溯 4 层，不扫树）。 */
-    private static boolean looksLikeMineTab(View view) {
+    /**
+     * 判定按下的是不是「我的」tab —— **三层判据，任一命中即算**。
+     *
+     * <ol>
+     *   <li><b>文案集合</b>（{@link #MINE_LABELS}）：`我的` / **`未登录`** / `我的 ` / `My`。
+     *       未登录时高德把文案渲染成「未登录」，这一层是最小改动、立刻可用；</li>
+     *   <li><b>模型身份</b>：反射 tab 模型对象（`dispatchTabTouchEvent` 的第 1 个参数）的
+     *       String 字段，任一包含 `mine`（忽略大小写）即算 —— 不受文案本地化/登录态影响；</li>
+     *   <li><b>末位兜底</b>：该 View 是父容器的**最后一个**子 View，且文案**不在**已知的其它 tab
+     *       文案集合里。有误判风险，所以只在 ①② 都不成立时才用，并打 `via=index` 便于排查。</li>
+     * </ol>
+     *
+     * <p>结果会通过 {@link #matchVia} 暴露，并打一条去重的 `mine_tab_probe`。
+     */
+    private static boolean matchMine(View view, Object model) {
+        matchVia = "none";
+        if (view == null) return false;
+        String label = textOf(view);
+        boolean mine;
+        // ① 文案集合
+        if (inSet(MINE_LABELS, label)) {
+            matchVia = "label";
+            mine = true;
+        } else if (modelMentionsMine(model)) {
+            // ② 模型身份（id / key / name 里含 mine）
+            matchVia = "id";
+            mine = true;
+        } else if (isLastTab(view) && !inSet(OTHER_LABELS, label)) {
+            // ③ 末位兜底（①② 都不成立时才用）
+            matchVia = "index";
+            mine = true;
+        } else {
+            mine = false;
+        }
+        probeOnce(label, matchVia, mine);
+        return mine;
+    }
+
+    /** 该 View 自己或它的直接子 View 里的文本（只看一层，不扫树）。 */
+    private static String textOf(View view) {
         try {
             View node = view;
             for (int up = 0; up < 4 && node != null; up++) {
                 CharSequence label = labelOf(node);
-                if (label != null) return LABEL_MINE.contentEquals(label);
+                if (label != null) return label.toString().trim();
                 ViewParent parent = node.getParent();
                 if (!(parent instanceof ViewGroup)) break;
                 node = (View) parent;
             }
-        } catch (Throwable ignored) {
-            // 判定失败就不触发，宁可不弹也不误弹
+        } catch (Throwable ignored) { }
+        return "";
+    }
+
+    private static boolean inSet(String[] set, String value) {
+        if (value == null) return false;
+        String v = value.trim();
+        if (v.length() == 0) return false;
+        for (int i = 0; i < set.length; i++) {
+            if (set[i].trim().contentEquals(v)) return true;
         }
         return false;
+    }
+
+    /** 反射 tab 模型的 String 字段，任一包含 "mine"（忽略大小写）即算命中。 */
+    private static boolean modelMentionsMine(Object model) {
+        if (model == null) return false;
+        // `dispatchTabTouchEvent` 的第 1 个参数在 17.02 上是 **tab id**（可能是 String），
+        // 不一定是模型对象 —— 所以先看它本身是不是字符串。
+        try {
+            if (model instanceof CharSequence) {
+                return model.toString().toLowerCase().contains("mine");
+            }
+        } catch (Throwable ignored) { }
+        try {
+            Class<?> c = model.getClass();
+            for (int depth = 0; depth < 4 && c != null && c != Object.class; depth++) {
+                java.lang.reflect.Field[] fields = c.getDeclaredFields();
+                for (int i = 0; i < fields.length; i++) {
+                    if (fields[i].getType() != String.class) continue;
+                    try {
+                        fields[i].setAccessible(true);
+                        Object v = fields[i].get(model);
+                        if (v instanceof String
+                                && ((String) v).toLowerCase().contains("mine")) {
+                            return true;
+                        }
+                    } catch (Throwable ignored) { }
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Throwable ignored) { }
+        return false;
+    }
+
+    /** 该 View 是不是父容器的最后一个子 View（「我的」在高德底栏是最后一格）。 */
+    private static boolean isLastTab(View view) {
+        try {
+            ViewParent parent = view.getParent();
+            if (!(parent instanceof ViewGroup)) return false;
+            ViewGroup group = (ViewGroup) parent;
+            int index = group.indexOfChild(view);
+            return index >= 0 && index == group.getChildCount() - 1;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** `mine_tab_probe`：每个 `label|via` 只打一次（最多 32 条），避免长按刷屏。 */
+    private static void probeOnce(String label, String via, boolean mine) {
+        try {
+            if (SEEN_LABELS.size() > 32) return;
+            if (SEEN_LABELS.add(label + "|" + via)) {
+                H.log("event=mine_tab_probe label=" + label + " via=" + via + " mine=" + mine);
+            }
+        } catch (Throwable ignored) { }
     }
 
     /** 该 View 自己或它的直接子 View 里的文本（只看一层）。 */

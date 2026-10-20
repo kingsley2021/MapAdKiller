@@ -46,6 +46,13 @@ public final class UpdateChecker {
     /** 自动检查的间隔：一天一次就够，失败也照样计时（避免每次启动都重试）。 */
     private static final long AUTO_INTERVAL_MS = 24L * 60 * 60 * 1000L;
     /**
+     * 整轮检查的总时长上限。
+     *
+     * <p>8 个源是**串行**试的，单源 4s 连接 + 5s 读取，最坏 8×9s ≈ 72s。用户真机就卡在
+     * 「检查中…」不出来。这道闸保证**任何情况下 12 秒内必出终态**。
+     */
+    private static final long DEADLINE_MS = 12L * 1000L;
+    /**
      * 隐藏的「模拟新版」开关（默认不存在 = 关闭，不出现在任何可见界面）。
      *
      * <p>存在的唯一理由是可测试性：面板首次打开会真的后台查一次，立刻把手写进
@@ -197,6 +204,11 @@ public final class UpdateChecker {
         }
     }
 
+    /** 是否已有一轮检查在跑（{@code check()} 会直接 return，回调也不会来）。 */
+    public static boolean isChecking() {
+        return sRunning;
+    }
+
     /** 后台检查；force=false 时受 6 小时节流约束。回调在主线程。 */
     public static void check(final Context c, final boolean force, final Callback cb) {
         final Context app = c.getApplicationContext();
@@ -234,8 +246,15 @@ public final class UpdateChecker {
                 String found = null;
                 String src = "";
                 String err = "";
+                final long started = System.currentTimeMillis();
                 try {
                     for (int i = 0; i < Version.UPDATE_SOURCES.length; i++) {
+                        // 总时长上限：8 个源串行，最坏情况必须也能在 DEADLINE_MS 内出终态。
+                        // 少了这道闸，「卡在检查中」就会无限持续（用户真机截图）。
+                        if (System.currentTimeMillis() - started > DEADLINE_MS) {
+                            err = "deadline";
+                            break;
+                        }
                         String url = Version.UPDATE_SOURCES[i];
                         try {
                             String body = httpGet(url);
@@ -264,8 +283,14 @@ public final class UpdateChecker {
                     }
                     e.commit();
                 } catch (Throwable ignored) {}
-                if (found != null) Log.i(TAG, "latest=" + found + " via " + src);
-                else Log.w(TAG, "check failed: " + err);
+                // 终态一定落地：成功 ⇒ latest/new，全失败/超时 ⇒ failed。
+                // 这一行是「检查中永不结束」的判据：任何一轮都必须留下它。
+                final String result = found == null ? "failed"
+                        : (compare(found, Version.NAME) > 0 ? "new" : "latest");
+                Log.i(TAG, "event=update_check_done result=" + result
+                        + " elapsed=" + (System.currentTimeMillis() - started)
+                        + " source=" + (found != null ? src : "none")
+                        + (found != null ? (" latest=" + found) : (" err=" + err)));
 
                 final String fv = found;
                 final String fs = found != null ? src : err;
@@ -299,8 +324,10 @@ public final class UpdateChecker {
         HttpURLConnection conn = null;
         try {
             conn = (HttpURLConnection) new URL(url).openConnection();
-            conn.setConnectTimeout(6000);
-            conn.setReadTimeout(8000);
+            // 拉的是 ~300 字节的 module.prop：4s 连接 + 5s 读取绰绰有余。
+            // 原来的 6s/8s 乘以 8 个串行源 = 最坏 112 秒 —— 用户看到的就是「卡在检查中」。
+            conn.setConnectTimeout(4000);
+            conn.setReadTimeout(5000);
             conn.setInstanceFollowRedirects(true);
             conn.setRequestProperty("User-Agent", "MapAdKiller/" + Version.NAME);
             conn.setRequestProperty("Accept", "application/vnd.github+json, */*");

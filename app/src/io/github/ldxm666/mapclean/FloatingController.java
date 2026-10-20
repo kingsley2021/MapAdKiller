@@ -393,6 +393,8 @@ public final class FloatingController {
             panel.setVisibility(View.GONE);
 
             final FloatingBall ball = new FloatingBall(activity);
+            // 自绘 View 不在无障碍树里；给个描述既利于读屏，也方便自动化验证时定位这颗球。
+            try { ball.setContentDescription("MapAdKiller 设置"); } catch (Throwable ignored) { }
             applyPalette(ball, dark);
             // The 外观 page previews size/opacity on this very orb, so the sheet needs the
             // reference; the ball reads the persisted values in its own constructor.

@@ -253,10 +253,17 @@ public final class Config {
             if (p != null) {
                 try { p.registerOnSharedPreferenceChangeListener(listener); } catch (Throwable ignored) { }
             }
-            if (!backendLogged) {
-                backendLogged = true;
-                // 只打一次（remote / local / none 之一），供面板与排障判读。
-                H.log("event=cfg_backend " + backendName());
+            if (backend >= 0) {
+                // 定案：只打一次（remote / local / none），强制本地时追加 forced=true。
+                if (!backendLogged) {
+                    backendLogged = true;
+                    H.log("event=cfg_backend " + backendName()
+                            + (backendForced ? " forced=true" : ""));
+                }
+            } else if (!pendingLogged) {
+                // 未定案（拿不到宿主 Context）：**不缓存失败**，下次调用再试。
+                pendingLogged = true;
+                H.log("event=cfg_backend pending reason=no_context");
             }
             return p;
         }
@@ -280,9 +287,23 @@ public final class Config {
     /** 本地兜底后端文件名。**不要改**：面板与 hook 必须读同一个文件。 */
     public static final String LOCAL_PREFS = "mapclean_cfg";
     private static final String K_LOCAL_MIGRATED = "_local_migrated";
+    /**
+     * **隐藏键**（不进任何可见列表）：强制走本地后端。
+     *
+     * <p>为什么需要：LSPatch 的远程配置通道对文件篡改有韧性（改名 / `chmod 000` 都会被自动重建
+     * 或仍可读），所以"本地降级"这条路在真机上**无法自然触发**，也就永远没人验过。
+     * 这个键让验证可以显式切到本地后端。
+     *
+     * <p>读取方式：**远程和本地都看，任一为 true 即生效** —— 它必须在"远程不可用"时也能被读到，
+     * 只查远程就没有意义。
+     */
+    public static final String K_CFG_FORCE_LOCAL = "cfg_force_local";
 
-    private static volatile int backend = -1;        // -1 = 未解析
+    private static volatile int backend = -1;        // -1 = 未解析（允许重试）
     private static volatile boolean backendLogged;
+    private static volatile boolean pendingLogged;
+    private static volatile boolean backendForced;   // 本次解析是否是"强制本地"
+    private static volatile long lastResolveAt;      // 上次尝试解析的时间（用于重试节流）
 
     /** 当前后端：{@link #BACKEND_REMOTE} / {@link #BACKEND_LOCAL} / {@link #BACKEND_NONE}。 */
     public static int backend() {
@@ -291,9 +312,44 @@ public final class Config {
         return b < 0 ? BACKEND_NONE : b;
     }
 
+    /** 本次解析是否走了"强制本地"（面板可据此显示"（强制本地）"）。 */
+    public static boolean backendForced() {
+        prefs();
+        return backendForced;
+    }
+
+    /**
+     * 解析后端。**失败不缓存**：拿不到宿主 Context 时把 {@code backend} 留在 -1，
+     * 下次 {@link #prefs()} / {@link #backend()} 再试（面板打开时 Application 一定已就绪）。
+     *
+     * <p>重试节流 500ms：{@code Config.visible()} 是热路径，不能在"没有 Context"的进程里
+     * 每次调用都做一遍反射。
+     */
     private static SharedPreferences resolveBackend() {
+        long now = android.os.SystemClock.uptimeMillis();
+        if (backend < 0 && lastResolveAt != 0 && now - lastResolveAt < 500) return null;
+        lastResolveAt = now;
+
         SharedPreferences remote = remotePrefs();
         SharedPreferences local = localPrefs();
+        boolean forced = forceLocal(remote, local);
+
+        // ★ 隐藏键：强制本地。必须在"选远程"之前判，且**不播种**（否则等于没测到降级）。
+        if (forced) {
+            if (local != null) {
+                backend = BACKEND_LOCAL;
+                backendForced = true;
+                // 强制本地时**必须真的把库建出来**，否则 verify-runner 无法用
+                // `ls shared_prefs/` 证明它生效（一个键都没写时文件可能不落盘）。
+                ensureLocalCreated(local);
+                return local;
+            }
+            // 拿不到宿主 Context ⇒ **不定案**，下次重试（不能永久退化成远程）。
+            backend = -1;
+            return null;
+        }
+
+        backendForced = false;
         if (remote != null) {
             backend = BACKEND_REMOTE;
             // 顺手把远程值播种到本地一次：将来远程不可用时配置不会"消失"。
@@ -304,8 +360,40 @@ public final class Config {
             backend = BACKEND_LOCAL;
             return local;
         }
-        backend = BACKEND_NONE;
+        // 两个都拿不到 —— 大概率是"Context 还没就绪"，**不定案**，留给下次重试。
+        backend = -1;
         return null;
+    }
+
+    /**
+     * 强制本地时确保 `mapclean_cfg` 真的落盘。
+     *
+     * <p>SharedPreferences 的文件是**首次 commit 时**才写出的；一个键都没写就不会有
+     * `shared_prefs/mapclean_cfg.xml`。所以这里写一个 {@code _local_created=<时间戳>} 标记
+     * 并 commit，让验证脚本能直接用 `ls shared_prefs/` 判定"本地后端真的生效了"。
+     */
+    private static void ensureLocalCreated(SharedPreferences local) {
+        try {
+            if (!local.contains("_local_created")) {
+                local.edit().putLong("_local_created",
+                        android.os.SystemClock.uptimeMillis()).commit();
+                H.log("event=cfg_local_ready path=" + LOCAL_PREFS);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * 读隐藏键 {@link #K_CFG_FORCE_LOCAL}：远程、本地**任一为 true 即生效**。
+     *
+     * <p>不写进任何可见列表（面板不注册它），只给验证/排障用。
+     */
+    private static boolean forceLocal(SharedPreferences remote, SharedPreferences local) {
+        return readBool(remote, K_CFG_FORCE_LOCAL) || readBool(local, K_CFG_FORCE_LOCAL);
+    }
+
+    private static boolean readBool(SharedPreferences p, String key) {
+        if (p == null) return false;
+        try { return p.getBoolean(key, false); } catch (Throwable t) { return false; }
     }
 
     private static SharedPreferences remotePrefs() {
@@ -328,19 +416,48 @@ public final class Config {
     }
 
     /**
-     * 宿主进程的 Context —— **不依赖框架**。
+     * 宿主进程的 Context —— **不依赖框架**，四级顺序，任一成功即返回。
      *
-     * <p>先走 {@code android.app.ActivityThread.currentApplication()}（任何进程里都能拿到本进程的
-     * Application，纯反射、不碰框架 API）；拿不到再试 {@code io.github.ldxm666.mapclean.App.ctx()}
-     * （内置版里由面板侧持有的实例）。两条都用反射 ⇒ 不引入对 mapclean 的编译期依赖，
-     * 精简构建里也不会缺符号。
+     * <ol>
+     *   <li>{@code ActivityThread.currentApplication()} —— 最常见，但**安装早期返回 null**
+     *       （这正是 r23 "强制本地没生效"的根因）；</li>
+     *   <li>{@code android.app.AppGlobals.getInitialApplication()} —— 隐藏静态方法，
+     *       在 Application 绑定后即可用，比 currentApplication 更早成功；</li>
+     *   <li>{@code ActivityThread.currentActivityThread()} 的 {@code mInitialApplication} 字段
+     *       —— 前两条都失败时的兜底（字段在 ActivityThread 实例上）；</li>
+     *   <li>{@code io.github.ldxm666.mapclean.App.ctx()} —— 内置版里由面板侧持有的实例
+     *       （反射调用 ⇒ 不引入对 mapclean 的编译期依赖，精简构建不会缺符号）。</li>
+     * </ol>
+     * 全部 try/catch，任一抛异常继续试下一个；全失败返回 null（调用方按"未定案"处理）。
+     *
+     * <p>注：libxposed API 102 的 {@code XposedModule} **没有** context getter
+     * （`javap` 核实：该类只有构造器），所以没有"从 module 拿 Context"这条路。
      */
     private static android.content.Context hostContext() {
+        // 1) ActivityThread.currentApplication()
         try {
             Class<?> at = Class.forName("android.app.ActivityThread");
             Object app = at.getMethod("currentApplication").invoke(null);
             if (app instanceof android.content.Context) return (android.content.Context) app;
         } catch (Throwable ignored) { }
+        // 2) AppGlobals.getInitialApplication()
+        try {
+            Class<?> ag = Class.forName("android.app.AppGlobals");
+            Object app = ag.getMethod("getInitialApplication").invoke(null);
+            if (app instanceof android.content.Context) return (android.content.Context) app;
+        } catch (Throwable ignored) { }
+        // 3) ActivityThread.currentActivityThread().mInitialApplication
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Object thread = at.getMethod("currentActivityThread").invoke(null);
+            if (thread != null) {
+                java.lang.reflect.Field f = at.getDeclaredField("mInitialApplication");
+                f.setAccessible(true);
+                Object app = f.get(thread);
+                if (app instanceof android.content.Context) return (android.content.Context) app;
+            }
+        } catch (Throwable ignored) { }
+        // 4) mapclean.App.ctx()（内置版面板侧持有）
         try {
             Class<?> app = Class.forName("io.github.ldxm666.mapclean.App");
             Object ctx = app.getMethod("ctx").invoke(null);
