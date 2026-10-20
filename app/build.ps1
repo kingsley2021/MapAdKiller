@@ -4,6 +4,7 @@
 # 临时构建目录必须 ASCII —— aapt2/d8 在非 ASCII 路径上会失败（见 MapAdKiller build.ps1 同款坑）。
 #
 # 用法： pwsh -File app\build.ps1
+param([string]$SrcOverride = "")
 $ErrorActionPreference = "Stop"
 $Sdk   = "C:\Users\Administrator\AppData\Local\Android\Sdk"
 $Bt    = "$Sdk\build-tools\35.0.0"
@@ -25,7 +26,13 @@ $srcRoot = Join-Path $env:TEMP "bmapcleanbuild"
 try { New-Item -ItemType Directory -Force -Path $srcRoot -ErrorAction Stop | Out-Null } catch { $srcRoot = "$env:TEMP\bmapcleanbuild"; New-Item -ItemType Directory -Force -Path $srcRoot | Out-Null }
 $src = Join-Path $srcRoot ("bc" + $stamp + "-" + [guid]::NewGuid().ToString("N").Substring(0,8))
 New-Item -ItemType Directory -Force -Path "$src\build\stubs","$src\build\classes","$src\build\dex","$src\build\out" | Out-Null
-Copy-Item "$App\stub-src","$App\src","$App\res","$App\META-INF","$App\libs" -Destination $src -Recurse -Force
+$srcTree = if ($SrcOverride -and (Test-Path $SrcOverride)) { $SrcOverride } else { "$App\src" }
+if (-not (Test-Path "$srcTree\io")) { throw "source tree not found: $srcTree" }
+# 注意：源目录名必须落到 $src\src（脚本后续按 $src\src 取源码），
+# 所以不能用 -Destination $src 直接拷目录（那会变成 $src\module-src）。
+New-Item -ItemType Directory -Force -Path "$src\src" | Out-Null
+Copy-Item "$srcTree\*" "$src\src" -Recurse -Force
+Copy-Item "$App\stub-src","$App\res","$App\META-INF","$App\libs" -Destination $src -Recurse -Force
 Copy-Item "$App\AndroidManifest.xml" $src
 if (-not (Test-Path "$src\AndroidManifest.xml")) { throw "copy failed" }
 
@@ -122,10 +129,24 @@ Write-Host "[5/6] zipalign + sign v1+v2+v3"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$src\build\out\module-aligned.apk")) { throw "16 KB zipalign failed" }
 & "$Bt\zipalign.exe" -c -P 16 4 "$src\build\out\module-aligned.apk"
 if ($LASTEXITCODE -ne 0) { throw "16 KB zipalign verification failed" }
+# ── 签名密钥：绝不自动生成 ─────────────────────────────────────────────────
+# 曾经这里是「没有就 keytool -genkeypair 生成一个」，结果 2.2.2 那次构建时
+# app\debug.keystore 丢失 ⇒ 悄悄换了密钥 ⇒ 老用户（≤2.2.1，证书 cbecdaeb…）
+# 无法覆盖升级（INSTALL_FAILED_UPDATE_INCOMPATIBLE）。现在缺密钥/密钥不符都直接失败。
 $ks = "$App\debug.keystore"
+$ksExpected = "cbecdaeb31836c4ab2ffe9271b47148810d1335f3a70782dc9d2d29d986554ed"
 if (-not (Test-Path $ks)) {
-    cmd /c "`"$Keytool`" -genkeypair -keystore `"$ks`" -storepass android -keypass android -alias bmapclean -keyalg RSA -keysize 2048 -validity 10000 -dname `"CN=BMapClean, OU=ENI, O=ENI, L=NA, S=NA, C=CN`" > `"$src\build\keytool.log`" 2>&1"
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $ks)) { Get-Content "$src\build\keytool.log"; throw "keytool failed" }
+    throw ("签名密钥库缺失: $ks`n不要新建！请恢复固定密钥（证书 SHA-256 = $ksExpected），" +
+           "否则老用户无法覆盖升级。历史副本示例: work\MapAdKiller-2.1.6\debug.keystore")
+}
+$ksInfo = & $Keytool -list -v -keystore $ks -storepass android 2>&1 | Out-String
+$ksMatch = [regex]::Match($ksInfo, 'SHA256:\s*([0-9A-Fa-f:]{95})')
+if ($ksMatch.Success) {
+    $ksHex = ($ksMatch.Groups[1].Value -replace ':', '').ToLower()
+    if ($ksHex -ne $ksExpected) {
+        throw ("签名密钥库证书不匹配！`n  实际: $ksHex`n  期望: $ksExpected`n" +
+               "用错密钥会让老用户无法覆盖升级，构建已中止。")
+    }
 }
 cmd /c "`"$Bt\apksigner.bat`" sign --ks `"$ks`" --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out `"$src\build\out\BMapClean.apk`" `"$src\build\out\module-aligned.apk`" > `"$src\build\sign.log`" 2>&1"
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$src\build\out\BMapClean.apk")) { Get-Content "$src\build\sign.log"; throw "apksigner sign failed" }

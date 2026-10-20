@@ -183,13 +183,16 @@ public final class FloatingConfig {
     public static boolean isEmbedded() {
         int known = embeddedState;
         if (known >= 0) return known == 1;
-        boolean value = false;
-        // 真实实现是 mapadkiller.HostInfo.isEmbedded()（判据：宿主 APK 内是否有
-        // assets/lspatch/config.json）。这里用反射是为了不在 mapclean 侧引入编译期依赖，
-        // 同时兼容 mapclean.App 将来可能提供的同名入口 —— 两个都试，任一返回 true 即算内置版。
-        value = reflectBool("io.github.ldxm666.mapadkiller.HostInfo");
-        if (!value) value = reflectBool("io.github.ldxm666.mapclean.App");
-        // 两个都拿不到 ⇒ 按模块版（默认不挂球），绝不因此崩。
+        boolean value;
+        try {
+            // 首选**直连**：HostInfo 是真实类（两种构建都有，不是 stub），
+            // 判据是宿主 APK 内是否有 assets/lspatch/config.json。
+            value = io.github.ldxm666.mapadkiller.HostInfo.isEmbedded();
+        } catch (Throwable t) {
+            // 兜底：万一 HostInfo 被挪走或改签名，再走一次反射（含 mapclean.App 的同名入口）。
+            value = reflectBool("io.github.ldxm666.mapadkiller.HostInfo")
+                    || reflectBool("io.github.ldxm666.mapclean.App");
+        }
         embeddedState = value ? 1 : 0;
         return value;
     }

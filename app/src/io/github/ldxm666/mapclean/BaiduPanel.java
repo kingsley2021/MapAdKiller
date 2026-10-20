@@ -29,27 +29,25 @@ final class BaiduPanel {
     private BaiduPanel() {}
 
     /** 百度's catalogue, mapped onto the panel's view model. */
-    static FloatingPanel.Group[] groups() {
+    static PanelTypes.Group[] groups() {
         Spec.Cat[] cats = Spec.cats();
         // One extra leading group: the 悬浮窗 master switch belongs to FloatingController, not
         // to 百度's own catalogue (Spec is the single source for the map's switches, and this
         // key is not one of them). Without it the orb could be switched off but never back on
         // from inside the sheet.
-        FloatingPanel.Group[] out = new FloatingPanel.Group[cats.length + 1];
-        out[0] = new FloatingPanel.Group("悬浮窗", new FloatingPanel.Item[]{
-            new FloatingPanel.Item(FloatingConfig.K_FLOAT_ENABLED, "悬浮窗入口（悬浮球）",
-                    "关掉后悬浮球和这个面板都不再出现。注意：百度/腾讯地图没有长按入口，关掉后要重新打开，只能打开 MapAdKiller 模块 App 手动恢复，或清除本应用数据后重新配置。"),
-        });
+        PanelTypes.Group[] out = new PanelTypes.Group[cats.length + 1];
+        out[0] = new PanelTypes.Group("悬浮窗", new PanelTypes.Item[]{
+            });
         for (int i = 0; i < cats.length; i++) {
             Spec.Cat cat = cats[i];
-            FloatingPanel.Item[] items = new FloatingPanel.Item[cat.rows.length];
+            PanelTypes.Item[] items = new PanelTypes.Item[cat.rows.length];
             for (int j = 0; j < cat.rows.length; j++) {
                 Spec.Row row = cat.rows[j];
-                items[j] = new FloatingPanel.Item(row.key, row.title, row.note);
+                items[j] = new PanelTypes.Item(row.key, row.title, row.note);
             }
             // The category's own subtitle ("改动后重启百度生效" and friends) is shown as the
             // group's note, the same slot the 高德 tool catalogue uses for its 5-cell warning.
-            out[i + 1] = new FloatingPanel.Group(cat.title, items, cat.subtitle);
+            out[i + 1] = new PanelTypes.Group(cat.title, items, cat.subtitle);
         }
         return out;
     }

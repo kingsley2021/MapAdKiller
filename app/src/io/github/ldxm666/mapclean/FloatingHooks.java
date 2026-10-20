@@ -27,6 +27,9 @@ public final class FloatingHooks {
 
     private static final String TAG = "MapCleanFloat";
 
+    /** One 「module mode, floating skipped」 line per process (install can be called per package). */
+    private static volatile boolean skippedLogged;
+
     /** One "I looked at this Activity class" line per class, so the log stays readable. */
     private static final java.util.Set<String> reported = java.util.Collections.synchronizedSet(
             new java.util.LinkedHashSet<String>());
@@ -81,6 +84,16 @@ public final class FloatingHooks {
 
     /** Registers the lifecycle watcher. Called once per host process. */
     public static void install(XposedModule module, final String hostPackage, final boolean darkCapable) {
+        // 模块模式（root / LSPosed 用户）**一条 hook 都不装**：不是装上再判断，而是根本不安装，
+        // 连 ActivityLifecycleCallbacks 都不注册 ⇒ 零成本、零残留。
+        // 悬浮窗是免 root 内置版专属功能；root 用户用模块 App 自己的设置页。
+        if (!io.github.ldxm666.mapadkiller.HostInfo.isEmbedded()) {
+            if (!skippedLogged) {
+                skippedLogged = true;
+                Log.i(TAG, "event=floating_skipped reason=module_mode");
+            }
+            return;
+        }
         try {
             module.hook(Application.class.getDeclaredMethod("onCreate"))
                     .setId("floating.lifecycle")

@@ -436,18 +436,28 @@ public final class Config {
     /** 包内可复用的宿主 Context（供 {@link HostInfo} 做签名/模式诊断）；拿不到返回 null。 */
     static android.content.Context hostCtx() { return hostContext(); }
 
+    /**
+     * 取**宿主进程自己的** Context。
+     *
+     * <p>★ 必须校验包名：模块可能被注入到别的 App（实测日志里出现过
+     * {@code com.miui.contentcatcher} / {@code com.google.android.webview}），
+     * 若把那些 Context 当宿主用，`getSharedPreferences()` 会写到**别人的 data 目录**
+     * ⇒ 权限不足 ⇒ {@code commit_false} ⇒ 用户看到"开关拨了不生效"。
+     * 判据以 {@code ActivityThread.currentPackageName()}（= 当前进程所属包）为准。
+     */
     private static android.content.Context hostContext() {
+        String procPkg = currentProcessPackage();
         // 1) ActivityThread.currentApplication()
         try {
             Class<?> at = Class.forName("android.app.ActivityThread");
             Object app = at.getMethod("currentApplication").invoke(null);
-            if (app instanceof android.content.Context) return (android.content.Context) app;
+            if (isHostCtx(app, procPkg)) return (android.content.Context) app;
         } catch (Throwable ignored) { }
         // 2) AppGlobals.getInitialApplication()
         try {
             Class<?> ag = Class.forName("android.app.AppGlobals");
             Object app = ag.getMethod("getInitialApplication").invoke(null);
-            if (app instanceof android.content.Context) return (android.content.Context) app;
+            if (isHostCtx(app, procPkg)) return (android.content.Context) app;
         } catch (Throwable ignored) { }
         // 3) ActivityThread.currentActivityThread().mInitialApplication
         try {
@@ -457,18 +467,44 @@ public final class Config {
                 java.lang.reflect.Field f = at.getDeclaredField("mInitialApplication");
                 f.setAccessible(true);
                 Object app = f.get(thread);
-                if (app instanceof android.content.Context) return (android.content.Context) app;
+                if (isHostCtx(app, procPkg)) return (android.content.Context) app;
             }
         } catch (Throwable ignored) { }
         // 4) mapclean.App.ctx()（内置版面板侧持有）
         try {
             Class<?> app = Class.forName("io.github.ldxm666.mapclean.App");
             Object ctx = app.getMethod("ctx").invoke(null);
-            if (ctx instanceof android.content.Context) return (android.content.Context) ctx;
+            if (isHostCtx(ctx, procPkg)) return (android.content.Context) ctx;
         } catch (Throwable ignored) { }
         return null;
     }
 
+    /** 当前进程所属包名（反射取，取不到返回 null）。 */
+    private static String currentProcessPackage() {
+        try {
+            Class<?> at = Class.forName("android.app.ActivityThread");
+            Object v = at.getMethod("currentPackageName").invoke(null);
+            if (v instanceof String) return (String) v;
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    /**
+     * 这个 Context 是不是**当前进程**的宿主 Context。
+     *
+     * <p>拿不到进程包名时退化为"包名属于已知地图包"；再不行就放行（宁可退回旧行为，
+     * 也不要因为校验过严让配置完全不可用）。
+     */
+    private static boolean isHostCtx(Object ctx, String procPkg) {
+        if (!(ctx instanceof android.content.Context)) return false;
+        String pkg;
+        try { pkg = ((android.content.Context) ctx).getPackageName(); } catch (Throwable t) { return false; }
+        if (pkg == null || pkg.length() == 0) return false;
+        if (procPkg != null && procPkg.length() > 0) return procPkg.equals(pkg);
+        return pkg.equals("com.autonavi.minimap")
+                || pkg.equals("com.baidu.BaiduMap")
+                || pkg.equals("com.tencent.map");
+    }
     /**
      * 把远程配置播种到本地（一次性，标记 {@link #K_LOCAL_MIGRATED}）。
      *

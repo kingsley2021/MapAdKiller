@@ -102,6 +102,17 @@ public final class FloatingController {
      * {@code setEnabled(true)} cannot add a second orb.
      */
     public static void setEnabled(boolean value) {
+        // 双保险：模块模式下永远不进入「挂载」分支（关闭分支照常执行，用于清理残留）。
+        if (value) {
+            try {
+                if (!io.github.ldxm666.mapadkiller.HostInfo.isEmbedded()) {
+                    Log.i(TAG, "event=floating_skipped reason=module_mode via=setEnabled");
+                    return;
+                }
+            } catch (Throwable ignored) {
+                return;
+            }
+        }
         enabled = Boolean.valueOf(value);
         if (value) {
             revealOnAttach = true;
@@ -365,6 +376,12 @@ public final class FloatingController {
      */
     public static void attach(final Activity activity) {
         if (activity == null) return;
+        // 双保险：模块模式（root/LSPosed）永不挂载悬浮层，即使有人从别处调进来。
+        try {
+            if (!io.github.ldxm666.mapadkiller.HostInfo.isEmbedded()) return;
+        } catch (Throwable ignored) {
+            return;
+        }
         // Record the Activity before the switch is consulted: when the user turns the overlay
         // back on, reattach() needs to know which windows to put it into, and by then the
         // switch has been off for the whole session.

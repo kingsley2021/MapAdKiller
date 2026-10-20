@@ -102,13 +102,11 @@ public final class AmapMineEntry {
             new WeakReference<View>(null);
 
     /**
-     * 长按已经弹过面板 ⇒ 把紧随其后的那一次 tab 点击**吞掉**。
+     * 长按弹过面板后，记录「这一次点击是长按跟来的」（**仅记录，不拦截**）。
      *
-     * <p>为什么需要：真机 r6 实测长按之后仍会跟一次 {@code dispatchTabClick}，页面顺带切到
-     * 「我的」—— 用户预期是「只弹面板，页面不动」。判据只有「刚刚发生过长按」这一条，
-     * 普通轻点不受影响。
-     *
-     * <p>{@link #SWALLOW_WINDOW_MS} 是保险：万一长按后没有跟点击，标志也不能长期悬着。
+     * <p>历史：v1 曾在这里「吞掉」这次点击（不调用 {@code chain.proceed()}），结果短路了
+     * 整条 hook 链、把宿主的 tab 状态机弄坏 —— 首次长按之后就再也弹不出来（r22）。
+     * 现在只做记录，**永远 proceed**。
      */
     private static volatile boolean swallowNextClick;
     private static volatile long swallowAt;
@@ -118,6 +116,28 @@ public final class AmapMineEntry {
 
     /** 由 {@link AmapHooks} 的 feature 机制调用；任何异常都只会变成一条日志。 */
     public static void install(final ClassLoader cl) {
+        // ★★ 模块模式（root / LSPosed 独立安装）**一条 hook 都不装**。
+        //
+        // 用户明确要求：「长按我的页弹出设置页面不需要对于模块用户，这个只给免 root 用户用的，请移除！」
+        // ⇒ 模块用户改用模块 App 自己的设置页（MainActivity），不需要应用内入口。
+        //
+        // 注意这是**入口处的门控**，不是「装上再 return」：`installTabTrigger` 根本不会被调用，
+        // 所以模块模式下 `LiteTabBar` 上一条 hook 都没有 —— 与「关闭 = 不加载、不消耗性能」同一原则。
+        // 实现代码全部保留（以后可能还要用），只是不执行。
+        boolean embedded;
+        try {
+            embedded = HostInfo.isEmbedded();
+        } catch (Throwable t) {
+            // 判定失败时按「模块模式」处理：宁可不装，也不要在 root 用户身上多挂 hook。
+            // 单独一条日志，避免和「确实是模块模式」混淆（排查时一眼能分开）。
+            H.log("event=mine_entry_skipped reason=hostinfo_error err="
+                    + t.getClass().getSimpleName());
+            return;
+        }
+        if (!embedded) {
+            H.log("event=mine_entry_skipped reason=module_mode");
+            return;
+        }
         boolean off;
         try {
             off = Config.selected(K_MINE_ENTRY_OFF);

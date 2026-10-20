@@ -27,81 +27,89 @@ final class AmapPanel {
 
     private AmapPanel() {}
 
-    static FloatingPanel.Group[] groups() {
-        return new FloatingPanel.Group[]{
-            new FloatingPanel.Group("首页", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_TOOLS_VISIBLE, "首页工具宫格",
+    static PanelTypes.Group[] groups() {
+        return new PanelTypes.Group[]{
+            new PanelTypes.Group("首页", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_TOOLS_VISIBLE, "首页工具宫格",
                         "关闭后首页不再显示驾车 / 公交等工具入口。"),
-                new FloatingPanel.Item(Config.K_TOOLS_ALLOWLIST, "仅显示已开启的工具",
+                new PanelTypes.Item(Config.K_TOOLS_ALLOWLIST, "仅显示已开启的工具",
                         "开启后未设置和新增的推广工具一律不进入首页。"),
                 // 「更多工具」 is the app's own fixed cell, so it is not part of the tool
                 // catalogue's groups; keeping it here gives it the one obviously-placed
                 // switch it never had (it used to be buried at the end of 工具 → 其他).
-                new FloatingPanel.Item(moreToolsKey(), "更多工具入口",
+                new PanelTypes.Item(moreToolsKey(), "更多工具入口",
                         "首页那格「更多工具」。关掉后工具栏只剩你开启的工具。"),
-                new FloatingPanel.Item(Config.K_HOME_CHIPS, "设置家 / 设置单位 / 常去地点",
+                new PanelTypes.Item(Config.K_HOME_CHIPS, "设置家 / 设置单位 / 常去地点",
                         "控制首页那排回家与公司的快捷入口；改动立即生效。"),
-                new FloatingPanel.Item(Config.K_HOTWORD_OFF, "关闭搜索框热词轮播",
+                new PanelTypes.Item(Config.K_HOTWORD_OFF, "关闭搜索框热词轮播",
                         "把搜索框文字钉死为默认提示词，去掉运营广告词。"),
             }, null, POWER_CHIP),
             // 「省电」放在 chip 行**第 2 位**：第 1 位留给默认选中的「首页」，第 2 位保证任何
             // 屏宽都一眼可见。用户两次反馈「模块里没有省电开关入口」—— 藏在第 N 个 chip 里、
             // 或者需要横向滚动才看得到，就等于没有。
-            new FloatingPanel.Group(POWER_CHIP, powerSections(), POWER_NOTE,
-                    new FloatingPanel.Action() {
+            new PanelTypes.Group(POWER_CHIP, powerSections(), POWER_NOTE,
+                    new PanelTypes.Action() {
                         @Override public String label() { return "一键省电（全部开启拦截）"; }
                         @Override public int run() { return powerAllOn(); }
                     }),
-            new FloatingPanel.Group("工具", toolSections(), TOOL_NOTE),
-            new FloatingPanel.Group("内容", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_FEED_WEATHER, "天气卡片"),
-                new FloatingPanel.Item(Config.K_FEED_BOARD, "扫街榜 / 周边精选榜单"),
-                new FloatingPanel.Item(Config.K_FEED_CONTENT, "攻略 / 内容流卡片"),
-                new FloatingPanel.Item(Config.K_FEED_FESTIVAL, "出行节 / 促销活动接口"),
-                new FloatingPanel.Item(Config.K_RIDE_CARD_OFF, "关闭「去XXX」打车浮窗",
+            new PanelTypes.Group("工具", toolSections(), TOOL_NOTE),
+            new PanelTypes.Group("内容", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_FEED_WEATHER, "天气卡片"),
+                new PanelTypes.Item(Config.K_FEED_BOARD, "扫街榜 / 周边精选榜单"),
+                new PanelTypes.Item(Config.K_FEED_CONTENT, "攻略 / 内容流卡片"),
+                new PanelTypes.Item(Config.K_FEED_FESTIVAL, "出行节 / 促销活动接口"),
+                new PanelTypes.Item(Config.K_RIDE_CARD_OFF, "关闭「去XXX」打车浮窗",
                         "拦截首页打车运营卡。"),
             }),
-            new FloatingPanel.Group("地图", new FloatingPanel.Item[]{
+            new PanelTypes.Group("地图", new PanelTypes.Item[]{
                 // 真正的实现在原生层：libmapclean_labels.so 改写 map_assets/style_*X_Main
                 // 样式 protobuf，只把兴趣点要素置不可见，道路 / 水域 / 地名全部保留。
-                new FloatingPanel.Item(Config.K_MAP_POI, "显示地图兴趣点图标和名称",
+                new PanelTypes.Item(Config.K_MAP_POI, "显示地图兴趣点图标和名称",
                         "统一控制酒店、景点、门店等兴趣点的图标和名称；道路、街道、城市与地名保留。"),
-                new FloatingPanel.Item(Config.K_MAP_PROMO, "地图右侧运营挂件",
+                new PanelTypes.Item(Config.K_MAP_PROMO, "地图右侧运营挂件",
                         "扫街榜和活动入口。"),
-                new FloatingPanel.Item(Config.K_PLACE_RECOMMEND, "地点详情「发现好去处」",
+                new PanelTypes.Item(Config.K_PLACE_RECOMMEND, "地点详情「发现好去处」",
                         "长按选点详情里的照片推荐流。"),
             }),
-            new FloatingPanel.Group("我的", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_MY_ORDER_ROW, "订单 / 收藏 / 待评价"),
-                new FloatingPanel.Item(Config.K_MY_SERVICE_ROW, "车辆服务 / 高德运动"),
-                new FloatingPanel.Item(Config.K_MY_TASK, "达人任务卡片"),
-                new FloatingPanel.Item(Config.K_MY_PROMO_ROW, "热门活动卡"),
-                new FloatingPanel.Item(Config.K_MY_GUESS, "猜你喜欢"),
-                new FloatingPanel.Item(Config.K_MY_FRIENDS, "好友动态"),
+            new PanelTypes.Group("我的", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_MY_ORDER_ROW, "订单 / 收藏 / 待评价"),
+                new PanelTypes.Item(Config.K_MY_SERVICE_ROW, "车辆服务 / 高德运动"),
+                new PanelTypes.Item(Config.K_MY_TASK, "达人任务卡片"),
+                new PanelTypes.Item(Config.K_MY_PROMO_ROW, "热门活动卡"),
+                new PanelTypes.Item(Config.K_MY_GUESS, "猜你喜欢"),
+                new PanelTypes.Item(Config.K_MY_FRIENDS, "好友动态"),
             }),
             // 省电 —— 已前移到 chip 行第 2 位（见文件顶部 POWER_CHIP），这里不再重复注册。
-            new FloatingPanel.Group("底栏", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_TAB_PREFIX + "探索", "显示标签「探索」"),
-                new FloatingPanel.Item(Config.K_TAB_PREFIX + "长按说话", "显示标签「长按说话」"),
-                new FloatingPanel.Item(Config.K_TAB_PREFIX + "打车", "显示标签「打车」"),
-                new FloatingPanel.Item(Config.K_TAB_PREFIX + "我的", "显示标签「我的」"),
+            new PanelTypes.Group("底栏", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_TAB_PREFIX + "探索", "显示标签「探索」"),
+                new PanelTypes.Item(Config.K_TAB_PREFIX + "长按说话", "显示标签「长按说话」"),
+                new PanelTypes.Item(Config.K_TAB_PREFIX + "打车", "显示标签「打车」"),
+                new PanelTypes.Item(Config.K_TAB_PREFIX + "我的", "显示标签「我的」"),
             }),
-            new FloatingPanel.Group("其他", new FloatingPanel.Item[]{
-                // The 悬浮窗 master switch. Listed here as well as on the 我的 page's 4th icon
-                // so the sheet itself can turn the orb off; the icon is the way back, because
-                // in the 免 root build the sheet is unreachable once the orb is gone.
-                new FloatingPanel.Item(FloatingConfig.K_FLOAT_ENABLED, "悬浮窗入口（悬浮球）",
-                        // 默认值按安装形态分流（见 FloatingConfig.floatDefault）：内置版默认开，
-                        // 模块版默认关 —— 悬浮窗是免 root 用户专属，root 用户该用模块 App 的设置页。
-                        FloatingConfig.floatDefault()
-                                ? "关掉后悬浮球和这个面板都不再出现。需要重新打开时：长按底部「我的」标签约 1 秒，面板会再次弹出，把这一项拨回开即可。"
-                                : "模块版默认不显示悬浮球（悬浮窗主要面向免 root 内置版）。需要的话打开这一项即可；也可以直接用模块 App 的设置页。"),
-                new FloatingPanel.Item(Config.K_DEBUG_LOG, "调试日志",
-                        "把协议适配错误输出到 logcat，排障用。"),
-            // `true` = 这一页底部渲染「当前版本 / 检查更新」两行。免 root 内置版没有
-            // MainActivity，悬浮面板是它唯一的设置界面，所以版本与更新入口必须在这里。
-            }, null, true),
+            // 「其他」页：`true` = 底部渲染「当前版本 / 检查更新」两行（免 root 内置版没有
+            // MainActivity，悬浮面板是它唯一的设置界面，所以版本与更新入口必须在这里）。
+            new PanelTypes.Group("其他", othersItems(), null, true),
         };
+    }
+
+    /**
+     * 「其他」页的条目。
+     *
+     * <p>「悬浮窗入口（悬浮球）」**只在免 root 内置版出现**：模块模式（root/LSPosed）根本
+     * 没有悬浮窗（{@code FloatingHooks.install} 一条 hook 都不装），留着这一行只会让人困惑
+     * —— 用户明确要求"应用内悬浮窗整条移除，只给免 root 用"。内置版保持原样。
+     */
+    private static PanelTypes.Item[] othersItems() {
+        java.util.List<PanelTypes.Item> out =
+                new java.util.ArrayList<PanelTypes.Item>();
+        if (FloatingConfig.isEmbedded()) {
+            out.add(new PanelTypes.Item(FloatingConfig.K_FLOAT_ENABLED, "悬浮窗入口（悬浮球）",
+                    "关掉后悬浮球和这个面板都不再出现。需要重新打开时：长按底部「我的」标签约 1 秒，"
+                    + "面板会再次弹出，把这一项拨回开即可。"));
+        }
+        out.add(new PanelTypes.Item(Config.K_DEBUG_LOG, "调试日志",
+                "把协议适配错误输出到 logcat，排障用。"));
+        return out.toArray(new PanelTypes.Item[0]);
     }
 
     /**
@@ -153,45 +161,45 @@ final class AmapPanel {
      */
     static Object[][] powerSections() {
         return new Object[][]{
-            {"推送", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_PUSH_HARD_OFF,
+            {"推送", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_PUSH_HARD_OFF,
                         "关闭推送长连接（ACCS，省电最多）",
                         "关掉后高德推送（行程提醒 / 活动 / 消息 / 家人地图）会恢复，"
                         + "但 ACCS 长连接会重新占用 CPU。"),
-                new FloatingPanel.Item(Config.K_PUSH_OFF,
+                new PanelTypes.Item(Config.K_PUSH_OFF,
                         "关闭推送消息处理",
                         "不建长连接、不处理推送消息，但保留服务壳；比上面那条温和。"),
-                new FloatingPanel.Item(Config.K_PUSH_KILL_OFF,
+                new PanelTypes.Item(Config.K_PUSH_KILL_OFF,
                         "关闭推送服务壳（激进）",
                         "推送服务一创建就 stopSelf。可能影响推送相关功能，排查用。"),
             }},
-            {"后台任务", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_SUBPROC_JOB_OFF,
+            {"后台任务", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_SUBPROC_JOB_OFF,
                         "关闭周期任务（WorkManager / JobScheduler）",
                         "关掉后高德的周期后台任务会恢复（更耗电）。"),
-                new FloatingPanel.Item(Config.K_SUBPROC_OFF,
+                new PanelTypes.Item(Config.K_SUBPROC_OFF,
                         "关闭子进程拦截（总闸，排查用）",
                         "一次性放行所有子进程拦截；怀疑某功能被误伤时先关这个。"),
-                new FloatingPanel.Item(Config.K_SUBPROC_WIDGET_OFF,
+                new PanelTypes.Item(Config.K_SUBPROC_WIDGET_OFF,
                         "关闭桌面小组件刷新",
                         "关掉后桌面小组件会恢复刷新（更耗电）。"),
-                new FloatingPanel.Item(Config.K_SUBPROC_LOTUSPOOL_OFF,
+                new PanelTypes.Item(Config.K_SUBPROC_LOTUSPOOL_OFF,
                         "关闭云控调度池（LotusPool）",
                         "关掉后高德云控下发的周期任务会恢复。"),
             }},
-            {"埋点与广告", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_TRACK_OFF,
+            {"埋点与广告", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_TRACK_OFF,
                         "关闭阿里埋点 Analytics",
                         "关掉后阿里 UT 埋点会恢复上报。真机出现无法归因的异常时，第一个关它。"),
-                new FloatingPanel.Item(Config.K_ALIMAMA_SPLASH_OFF,
+                new PanelTypes.Item(Config.K_ALIMAMA_SPLASH_OFF,
                         "关闭开屏广告请求",
                         "关掉后开屏广告会恢复请求（有广告、也耗流量）。"),
-                new FloatingPanel.Item(Config.K_ALIMAMA_LOG_OFF,
+                new PanelTypes.Item(Config.K_ALIMAMA_LOG_OFF,
                         "关闭广告曝光上报",
                         "只关上报，不影响广告本身是否展示。"),
             }},
-            {"地图", new FloatingPanel.Item[]{
-                new FloatingPanel.Item(Config.K_LABELS_ON,
+            {"地图", new PanelTypes.Item[]{
+                new PanelTypes.Item(Config.K_LABELS_ON,
                         "启用第三方标注过滤",
                         "默认关闭；开启会恢复第三方标注过滤，但可能影响地图帧率。",
                         true),
@@ -252,8 +260,8 @@ final class AmapPanel {
     static Object[][] toolSections() {
         java.util.List<Object[]> out = new java.util.ArrayList<Object[]>();
         for (String group : io.github.ldxm666.mapadkiller.AmapToolCatalog.GROUPS) {
-            java.util.List<FloatingPanel.Item> on = new java.util.ArrayList<FloatingPanel.Item>();
-            java.util.List<FloatingPanel.Item> off = new java.util.ArrayList<FloatingPanel.Item>();
+            java.util.List<PanelTypes.Item> on = new java.util.ArrayList<PanelTypes.Item>();
+            java.util.List<PanelTypes.Item> off = new java.util.ArrayList<PanelTypes.Item>();
             for (String[] entry : io.github.ldxm666.mapadkiller.AmapToolCatalog.ENTRIES) {
                 if (!group.equals(entry[2])) continue;
                 // 「更多工具」 lives in the 首页 group instead: it is the app's fixed cell, not
@@ -262,12 +270,12 @@ final class AmapPanel {
                 if (io.github.ldxm666.mapadkiller.AmapData.MORE_TOOLS.equals(entry[0])) continue;
                 String key = io.github.ldxm666.mapadkiller.AmapToolCatalog.key(entry[0]);
                 if (key == null) continue;
-                FloatingPanel.Item item = new FloatingPanel.Item(key, entry[1], "工具 ID " + entry[0]);
+                PanelTypes.Item item = new PanelTypes.Item(key, entry[1], "工具 ID " + entry[0]);
                 (Config.visible(key) ? on : off).add(item);
             }
             if (on.isEmpty() && off.isEmpty()) continue;
             on.addAll(off);
-            out.add(new Object[]{group, on.toArray(new FloatingPanel.Item[0])});
+            out.add(new Object[]{group, on.toArray(new PanelTypes.Item[0])});
         }
         return out.toArray(new Object[0][]);
     }

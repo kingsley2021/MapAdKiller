@@ -13,7 +13,15 @@ public final class AmapHooks {
         feature("widgets", new Runnable() { public void run() { AmapMapWidget.install(cl); } });
         feature("labels", new Runnable() { public void run() { AmapPoiLayer.install(cl); } });
         feature("data", new Runnable() { public void run() { AmapProtocolHooks.install(cl); } });
-        feature("mine_entry", new Runnable() { public void run() { AmapMineEntry.install(cl); } });
+        // 长按「我的」入口是**免 root 内置版专属**（root/LSPosed 用户用模块 App 的设置页）。
+        // 在安装层就跳过，避免"装了 hook 再让面板打不开"的隐性开销。
+        feature("mine_entry", new Runnable() { public void run() {
+            if (!HostInfo.isEmbedded()) {
+                H.log("event=mine_entry_skipped reason=module_mode_at_install");
+                return;
+            }
+            AmapMineEntry.install(cl);
+        } });
         feature("place_recommend", new Runnable() { public void run() {
             try { AmapPlaceAds.install(cl); }
             catch (Exception error) { throw new IllegalStateException(error); }
