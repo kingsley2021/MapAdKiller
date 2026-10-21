@@ -20,6 +20,13 @@ public final class H {
 
     public static volatile XposedModule module;
 
+    /**
+     * Per-hook chatter ("HOOKED …", first "HIT …") is useful when debugging but costly on
+     * a cold start: 110 hooks x one log line each lands right in the first-frame window.
+     * Off by default; the miss warnings and the install_done summary stay.
+     */
+    public static volatile boolean verbose = false;
+
     public static final AtomicInteger ok = new AtomicInteger();
     public static final AtomicInteger miss = new AtomicInteger();
 
@@ -82,13 +89,13 @@ public final class H {
                    @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                        if (first) {
                            first = false;
-                           log(Log.INFO, MainHook.TAG, "HIT " + hid);
+                           if (verbose) log(Log.INFO, MainHook.TAG, "HIT " + hid);
                        }
                        return guarded.intercept(chain);
                    }
                });
             ok.incrementAndGet();
-            log(Log.INFO, MainHook.TAG, "HOOKED " + id + " -> " + m);
+            if (verbose) log(Log.INFO, MainHook.TAG, "HOOKED " + id + " -> " + m);
             return true;
         } catch (Throwable t) {
             miss.incrementAndGet();
