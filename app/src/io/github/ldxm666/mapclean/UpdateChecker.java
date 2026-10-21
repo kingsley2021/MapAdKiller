@@ -124,7 +124,7 @@ public final class UpdateChecker {
 
     public static boolean isOutdated(Context c) {
         String v = latest(c);
-        return v != null && compare(v, Version.NAME) > 0;
+        return v != null && compare(v, Version.LABEL) > 0;
     }
 
     /** Same question as {@link #isOutdated}, named for the call sites that ask it. */
@@ -194,7 +194,7 @@ public final class UpdateChecker {
     public static boolean shouldNotify(Context c) {
         try {
             String v = latest(c);
-            if (v == null || compare(v, Version.NAME) <= 0) return false;
+            if (v == null || compare(v, Version.LABEL) <= 0) return false;
             SharedPreferences p = prefs(c);
             if (v.equals(p.getString(K_TOASTED, null))) return false;
             p.edit().putString(K_TOASTED, v).commit();
@@ -228,7 +228,7 @@ public final class UpdateChecker {
             // 先把缓存结果吐出去，界面立刻有内容
             final String cv = cached;
             MAIN.post(new Runnable() {
-                @Override public void run() { cb.onResult(cv, compare(cv, Version.NAME) > 0, "cache"); }
+                @Override public void run() { cb.onResult(cv, compare(cv, Version.LABEL) > 0, "cache"); }
             });
         }
         try {
@@ -286,7 +286,7 @@ public final class UpdateChecker {
                 // 终态一定落地：成功 ⇒ latest/new，全失败/超时 ⇒ failed。
                 // 这一行是「检查中永不结束」的判据：任何一轮都必须留下它。
                 final String result = found == null ? "failed"
-                        : (compare(found, Version.NAME) > 0 ? "new" : "latest");
+                        : (compare(found, Version.LABEL) > 0 ? "new" : "latest");
                 Log.i(TAG, "event=update_check_done result=" + result
                         + " elapsed=" + (System.currentTimeMillis() - started)
                         + " source=" + (found != null ? src : "none")
@@ -296,7 +296,7 @@ public final class UpdateChecker {
                 final String fs = found != null ? src : err;
                 MAIN.post(new Runnable() {
                     @Override public void run() {
-                        if (cb != null) cb.onResult(fv, fv != null && compare(fv, Version.NAME) > 0, fs);
+                        if (cb != null) cb.onResult(fv, fv != null && compare(fv, Version.LABEL) > 0, fs);
                     }
                 });
             }
@@ -306,7 +306,7 @@ public final class UpdateChecker {
     // ── 内部实现 ────────────────────────────────────────────────────────
 
     private static SharedPreferences prefs(Context c) {
-        // Always compare Version.NAME (the embedded module), never the host map's PackageInfo.
+        // Always compare Version.LABEL (this module), never the host map's PackageInfo.
         return c.getSharedPreferences(EmbeddedSettingsPolicy.isHostPackage(c.getPackageName())
                 ? EmbeddedSettingsPolicy.UI_PREFS : PREF, Context.MODE_PRIVATE);
     }
@@ -353,7 +353,7 @@ public final class UpdateChecker {
 
     private static final Pattern P_TAG = Pattern.compile("\"tag_name\"\\s*:\\s*\"([^\"]+)\"");
     private static final Pattern P_NAME = Pattern.compile("\"name\"\\s*:\\s*\"[^\"]*?(\\d+\\.\\d+(?:\\.\\d+)*)\"");
-    private static final Pattern P_VER = Pattern.compile("(?m)^\\s*version\\s*=\\s*(\\d+\\.\\d+(?:\\.\\d+)*)\\s*$");
+    private static final Pattern P_VER = Pattern.compile("(?m)^\\s*version\\s*=\\s*([0-9][0-9A-Za-z._\\-]*)\\s*$");
     private static final Pattern P_ANY = Pattern.compile("(\\d+\\.\\d+(?:\\.\\d+)*)");
 
     /** 从各种形状的响应里抠出版本号：GitHub JSON（tag_name/name）、module.prop 文本、纯版本号 */
@@ -388,15 +388,29 @@ public final class UpdateChecker {
     /** 语义化比较：a>b 返回 1，相等 0，a<b -1（位数不同按 0 补齐） */
     static int compare(String a, String b) {
         if (a == null || b == null) return 0;
-        String[] x = a.split("\\.");
-        String[] y = b.split("\\.");
+        String ab = a, as = "";
+        int da = a.indexOf('-');
+        if (da >= 0) { ab = a.substring(0, da); as = a.substring(da + 1); }
+        String bb = b, bs = "";
+        int db = b.indexOf('-');
+        if (db >= 0) { bb = b.substring(0, db); bs = b.substring(db + 1); }
+        String[] x = ab.split("\\.");
+        String[] y = bb.split("\\.");
         int n = Math.max(x.length, y.length);
         for (int i = 0; i < n; i++) {
             int xi = i < x.length ? toInt(x[i]) : 0;
             int yi = i < y.length ? toInt(y[i]) : 0;
             if (xi != yi) return xi > yi ? 1 : -1;
         }
-        return 0;
+        // Same 2.2.3 base: "-step2" is newer than a plain build, step2 < step3.
+        int sa = stepOf(as), sb = stepOf(bs);
+        return sa == sb ? 0 : (sa > sb ? 1 : -1);
+    }
+
+    private static int stepOf(String suffix) {
+        if (suffix == null || suffix.length() == 0) return 0;
+        Matcher m = Pattern.compile("step(\\d+)", Pattern.CASE_INSENSITIVE).matcher(suffix);
+        return m.find() ? toInt(m.group(1)) : 0;
     }
 
     private static int toInt(String s) {
