@@ -31,6 +31,7 @@ import android.view.ViewGroup;
 import android.view.WindowInsets;
 import android.widget.CompoundButton;
 import android.widget.FrameLayout;
+import android.widget.ImageView;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
@@ -156,120 +157,69 @@ public final class MainActivity extends Activity {
         // Two framework themes so AlertDialog follows day/night without a styles.xml.
         setTheme(dark ? android.R.style.Theme_Material_NoActionBar
                       : android.R.style.Theme_Material_Light_NoActionBar);
-        getWindow().setBackgroundDrawable(new ColorDrawable(cBg()));
+        skin = new Skin(this, dark);
+        getWindow().setBackgroundDrawable(new ColorDrawable(skin.bg));
+        getWindow().setStatusBarColor(skin.bg);
+        getWindow().setNavigationBarColor(dark ? 0xFF0A0B0E : 0xFFFFFFFF);
+        int sysUi = View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+        if (!dark) sysUi |= View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR;
+        getWindow().getDecorView().setSystemUiVisibility(sysUi);
 
-        // Layout: ONE vertical flow -- hero+tabs (wrap) then pager (weight 1).
-        // The decorative blooms live in a sibling overlay FrameLayout that is inserted
-        // behind everything with a 0-height..MATCH_PARENT fill, instead of being a
-        // weighted band (a weighted blobs band stole half the screen and pushed the
-        // cards down, which is how the previous build ended up with a giant disc and
-        // no visible hero).
-        // Structure:
-        //   frame (FrameLayout, the activity content)
-        //     ├─ column (LinearLayout, vertical)  hero(+tabs) ─ pager(weight 1)
-        //     └─ bottomBar (floating glass bar, bottom-centre)
-        // The bar is an overlay so it never steals height from the pager, and the pager
-        // gets a real weighted height instead of an absolute topMargin guess.
-        overlay = new FrameLayout(this);
-        overlay.setBackgroundColor(cBg());
-
-        column = new LinearLayout(this);
-        column.setOrientation(LinearLayout.VERTICAL);
-        overlay.addView(column, new FrameLayout.LayoutParams(
+        contentHost = new FrameLayout(this);
+        contentHost.setBackgroundColor(0x00000000);
+        pager = new Pager(this);
+        pager.setOnPageChanged(new Pager.OnPageChanged() {
+            @Override public void onPageChanged(int index) { onTabShown(index); }
+        });
+        contentHost.addView(pager, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        hero = new LinearLayout(this);
-        hero.setOrientation(LinearLayout.VERTICAL);
-        int pad = dp(16);
-        hero.setPadding(pad, dp(8), pad, 0);
-        buildHero(hero);
-
-        tabBar = new LinearLayout(this);
-        tabBar.setOrientation(LinearLayout.HORIZONTAL);
-        tabBar.setGravity(Gravity.CENTER_VERTICAL);
-        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        tlp.topMargin = dp(10);
-        hero.addView(tabBar, tlp);
-
-        // 搜索条：tab 下方、pager 上方，四页共用一条。
-        // “其他”页只有两三项，SwitchFinder.attach() 会把整条 GONE 掉，不占高度。
+        // 搜索索引必须先于页面构建：registerPageTarget 会在建行之前重置该页索引。
         finder = new SwitchFinder(this, dark);
         finder.setPageJumper(new SwitchFinder.PageJumper() {
             @Override public void jump(int page) {
-                if (pager != null) pager.setPage(page, true);
+                showTab(TAB_CONFIG, true);
+                for (int i = 0; i < appPageIds.size(); i++) {
+                    if (appPageIds.get(i) == page) { selectApp(i); break; }
+                }
             }
         });
-        LinearLayout.LayoutParams flp = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, UiKit.dp(this, 42));
-        flp.topMargin = dp(10);
-        hero.addView(finder.bar(), flp);
-        hero.addView(finder.resultsHost(), new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
 
-        column.addView(hero, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        // 配置页先建：首页的「N 个开关」和备份页的统计都读这三张开关表。
+        configScreen = buildConfigPage();
+        homePage = buildHomePage();
+        backupPage = buildBackupPage();
+        aboutPage = buildAboutPage();
+        pager.addView(homePage);
+        pager.addView(configScreen);
+        pager.addView(backupPage);
+        pager.addView(aboutPage);
 
-        pager = new Pager(this);
-        pager.setOnPageChanged(new Pager.OnPageChanged() {
-            @Override public void onPageChanged(int index) { selectTab(index); }
-        });
-        column.addView(pager, new LinearLayout.LayoutParams(
+        navBar = buildBottomNav();
+        LinearLayout shell = new LinearLayout(this);
+        shell.setOrientation(LinearLayout.VERTICAL);
+        shell.setBackgroundColor(skin.bg);
+        shell.addView(contentHost, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        shell.addView(navBar, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        setContentView(shell);
 
-        if (embedded()) {
-            pager.addView(embeddedAmap() ? buildAmapPage() : buildBaiduPage());
-            addTab(embeddedAmap() ? "高德地图" : "百度地图");
-        } else {
-            pager.addView(buildBaiduPage());
-            pager.addView(buildAmapPage());
-            addTab("百度地图");
-            addTab("高德地图");
-        }
-        pager.addView(buildTmapPage());
-        addTab("腾讯地图");
-        pager.addView(buildOtherPage());
-        addTab("其他");
-
-        buildBottomBar();
-        overlay.addView(bottomBar, barLp);
-
-        setContentView(overlay);
-
-        // Decorative blooms: a full-bleed overlay behind the bar but above the page
-        // background would block touches, so they go into the WINDOW background instead.
-        applyWindowBloom();
-
-        // Reserve the hero's real height inside the pager once it is measured, then
-        // let each page scroll under the floating glass bar via its bottom padding.
-        hero.post(new Runnable() {
-            @Override public void run() {
-                applyHeroInset();
-                pager.post(new Runnable() {
-                    @Override public void run() {
-                        pager.setPage(0, false);
-                        selectTab(0);
-                        animateIn();
-                    }
-                });
-            }
-        });
-
-        overlay.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
+        // 底部标签栏在布局流里（不是浮层）：内容区自然止于栏顶，不需要给每页留 92 dp 的假底。
+        shell.setOnApplyWindowInsetsListener(new View.OnApplyWindowInsetsListener() {
             @Override public WindowInsets onApplyWindowInsets(View v, WindowInsets insets) {
                 int top = insets.getSystemWindowInsetTop();
                 int bottom = insets.getSystemWindowInsetBottom();
-                hero.setPadding(hero.getPaddingLeft(), dp(8) + top,
-                        hero.getPaddingRight(), hero.getPaddingBottom());
-                if (barLp != null) {
-                    barLp.setMargins(dp(14), 0, dp(14), bottom + dp(14));
-                    bottomBar.setLayoutParams(barLp);
-                }
-                for (int i = 0; i < pages.size(); i++) {
-                    pages.get(i).setPadding(0, 0, 0, bottom + dp(92));
-                }
+                contentHost.setPadding(0, top, 0, 0);
+                navBar.setPadding(skin.dp(16), skin.dp(6), skin.dp(16), bottom + skin.dp(10));
                 return insets;
             }
+        });
+
+        showTab(TAB_HOME, false);
+        renderStatus();
+        shell.post(new Runnable() {
+            @Override public void run() { UiKit.enter(contentHost, skin.dp(8), 0L); }
         });
     }
 
@@ -335,17 +285,17 @@ public final class MainActivity extends Activity {
 
     // ---------------------------------------------------------------- 调色板
 
-    private int cBg()       { return dark ? 0xFF0E1013 : 0xFFF2F3F7; }
-    private int cGlass()    { return dark ? 0xB01D2027 : 0xD9FFFFFF; }
-    private int cRimHi()    { return dark ? 0x40FFFFFF : 0x70FFFFFF; }
-    private int cRimLo()    { return dark ? 0x08FFFFFF : 0x12FFFFFF; }
-    private int cTxP()      { return dark ? 0xFFF2F4F8 : 0xFF171B23; }
-    private int cTxS()      { return dark ? 0xFF98A0AC : 0xFF7A8290; }
-    private int cAccent()   { return dark ? 0xFF7AB1FF : 0xFF0A6CF5; }
-    private int cRipple()   { return dark ? 0x267AB1FF : 0x140A6CF5; }
-    private int cTrackOff() { return dark ? 0x2E8A94A4 : 0x2E8A94A4; }
-    private int cDotOk()    { return dark ? 0xFF2BD88A : 0xFF12B76A; }
-    private int cDotBad()   { return dark ? 0xFFFF6B70 : 0xFFE5484D; }
+    private int cBg()       { return skin == null ? 0xFFF4F5F7 : skin.bg; }
+    private int cGlass()    { return skin == null ? 0xFFFFFFFF : skin.surface; }
+    private int cRimHi()    { return skin == null ? 0xFFFFFFFF : skin.rimHi; }
+    private int cRimLo()    { return skin == null ? 0x33FFFFFF : skin.rimLo; }
+    private int cTxP()      { return skin == null ? 0xFF14171C : skin.text; }
+    private int cTxS()      { return skin == null ? 0xFF5B6472 : skin.text2; }
+    private int cAccent()   { return skin == null ? 0xFF2563EB : skin.accent; }
+    private int cRipple()   { return dark ? 0x22FFFFFF : 0x0F000000; }
+    private int cTrackOff() { return skin == null ? 0x2E8A94A4 : skin.chipBg; }
+    private int cDotOk()    { return skin == null ? 0xFF16A34A : skin.success; }
+    private int cDotBad()   { return skin == null ? 0xFFDC2626 : skin.danger; }
 
     private int[] blobColors() {
         return dark
@@ -448,6 +398,7 @@ public final class MainActivity extends Activity {
 
     /** 玻璃面板：底层高光 rim + 内层半透明体，双层圆角模拟玻璃厚度 */
     private Drawable glass(float radiusDp) {
+        if (skin != null) return skin.glass(radiusDp);
         return UiKit.glass(cGlass(), cRimHi(), cRimLo(), dp(radiusDp), Math.max(1, dp(1)));
     }
 
@@ -487,7 +438,7 @@ public final class MainActivity extends Activity {
         }
     };
 
-    /** 版本行配色：已是最新=绿、有新版本=黄、未获取=灰（点一下强制刷新） */
+    /** 版本行配色：已是最新=绿、有新版本=黄、未获取=灰（点一下强制刷新）。 */
     private void renderVersionLines() {
         if (verLine == null) return;
         String latest = UpdateChecker.latest(this);
@@ -495,31 +446,32 @@ public final class MainActivity extends Activity {
         String txt;
         if (latest == null) {
             verLine.setTextColor(cTxS());
-            txt = "当前版本 v" + Version.NAME + " · 线上版本未获取（点此重试）";
+            txt = "当前 v" + Version.LABEL + " · 线上版本未获取";
         } else if (out) {
-            verLine.setTextColor(0xFFE0A200);      // 黄：有新版本
-            txt = "当前版本 v" + Version.NAME + " · 有新版本 v" + latest + "（点此查看/刷新）";
+            verLine.setTextColor(skin == null ? 0xFFD97706 : skin.warn);
+            txt = "当前 v" + Version.LABEL + " · 有新版本 v" + latest;
         } else {
-            verLine.setTextColor(cDotOk());        // 绿：已是最新
-            txt = "当前版本 v" + Version.NAME + " · 已是最新";
+            verLine.setTextColor(cDotOk());
+            txt = "当前 v" + Version.LABEL + " · 已是最新";
         }
         verLine.setText(txt);
-        if (updateBtn != null) {
-            if (out && latest != null) {
-                updateBtn.setText("⬆ 立即更新 v" + latest + "（镜像/GitHub/Telegram）");
-                updateBtn.setTextColor(0xFFFFFFFF);
-                updateBtn.setBackground(capsuleBg(0xFFE0A200, HEAD_R));
-            } else if (latest == null) {
-                updateBtn.setText("检查版本更新（点此重试）");
-                updateBtn.setTextColor(0xFFFFFFFF);
-                updateBtn.setBackground(capsuleBg(cAccent(), HEAD_R));
-            } else {
-                updateBtn.setText("✓ 已是最新 v" + Version.NAME + "（点此再检查）");
-                updateBtn.setTextColor(0xFFFFFFFF);
-                updateBtn.setBackground(capsuleBg(dark ? 0xFF1E7A4B : 0xFF12B76A, HEAD_R));
-            }
+        if (updateBtn == null) return;
+        int pill = dp(999);
+        if (out && latest != null) {
+            updateBtn.setText("立即更新");
+            updateBtn.setTextColor(0xFFFFFFFF);
+            updateBtn.setBackground(UiKit.ripple(0x33FFFFFF,
+                    UiKit.plate(skin == null ? 0xFFD97706 : skin.warn, pill), pill));
+        } else if (latest == null) {
+            updateBtn.setText("重试");
+            updateBtn.setTextColor(0xFFFFFFFF);
+            updateBtn.setBackground(UiKit.ripple(0x33FFFFFF,
+                    UiKit.plate(cAccent(), pill), pill));
+        } else {
+            updateBtn.setText("已是最新");
+            updateBtn.setTextColor(cDotOk());
+            updateBtn.setBackground(UiKit.plate(dark ? 0x1F34D399 : 0x1416A34A, pill));
         }
-        if (adLine != null) adLine.setText(adaptSummary());
     }
 
     /** 最佳适配：模块 hook 点验证过的目标版本 vs 本机实际版本 */
@@ -562,13 +514,13 @@ public final class MainActivity extends Activity {
         final AlertDialog dlg = new AlertDialog.Builder(this).create();
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(glass(GLASS_R));
+        box.setBackground(skin.glassFor(box, GLASS_R));
         int pad = dp(20);
         box.setPadding(pad, dp(18), pad, dp(14));
 
         box.addView(text("发现新版本 v" + latest, 18, Typeface.BOLD, cTxP()));
 
-        String msg = "当前版本 v" + Version.NAME + "　→　最新版本 v" + latest
+        String msg = "当前版本 v" + Version.LABEL + "　→　最新版本 v" + latest
                 + "\n\n【没有代理也能下载】点「镜像下载」走 gh-proxy 反代打开 Releases 页；"
                 + "「GitHub 下载」是官方直链（需要能访问 GitHub）。"
                 + "\n\n更新后建议强停三家地图 App 再重新打开。";
@@ -812,7 +764,7 @@ public final class MainActivity extends Activity {
     /** 刷新三格指标文案 + 配色 */
     private void refreshMetrics() {
         if (metricRow == null) return;
-        versionMetric = "v" + Version.NAME;
+        versionMetric = "v" + Version.LABEL;
         int sdk = sdkCount();
         sdkMetric = String.valueOf(sdk);
         for (int i = 0; i < metricRow.getChildCount(); i++) {
@@ -821,6 +773,7 @@ public final class MainActivity extends Activity {
             if (!(tag instanceof TextView)) continue;
             TextView tv = (TextView) tag;
             String value = i == 0 ? versionMetric : i == 1 ? scopeMetric : sdkMetric;
+            tv.setTextSize(value.length() > 9 ? 11.5f : 14f);
             // 三格各自配色：版本=强调色、作用域=绿/红/灰、SDK=有捕获才点亮。
             int color = i == 0 ? cAccent()
                     : i == 1 ? scopeMetricColor
@@ -884,44 +837,33 @@ public final class MainActivity extends Activity {
     private static final class Sec {
         LinearLayout group;
         LinearLayout card;
-        TextView chev;
-        View bar;
+        View chev;
         boolean expanded;
     }
 
-    /** 抽屉分组：玻璃药丸头 + 可折叠玻璃卡片（默认折叠） */
+    /** 抽屉分组：一张卡片 = 一个分类。头行常显，展开的内容落在同一张卡里。 */
     private Sec newDrawer(String title) {
         final Sec s = new Sec();
         s.expanded = false;
         s.group = new LinearLayout(this);
         s.group.setOrientation(LinearLayout.VERTICAL);
+        s.group.setBackground(skin.glassFor(s.group, 18));
+        UiKit.clipRounded(s.group, dp(18));
+        skin.shadow(s.group, 3f);
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
         head.setGravity(Gravity.CENTER_VERTICAL);
-        head.setMinimumHeight(dp(56));
-        head.setPadding(dp(16), dp(13), dp(14), dp(13));
-        head.setBackground(UiKit.ripple(cRipple(), glass(16), 16f));
-        head.setElevation(0);
-        UiKit.clipRounded(head, dp(16));
-        UiKit.pressable(head, 0.985f);
+        head.setMinimumHeight(dp(58));
+        head.setPadding(dp(18), dp(12), dp(14), dp(12));
+        head.setBackground(UiKit.rippleBare(cRipple(), dp(18)));
+        UiKit.pressable(head, 0.995f);
 
-        // 左侧色条：展开时点亮，给折叠状态一个视觉锤点
-        s.bar = new View(this);
-        LinearLayout.LayoutParams barLp = new LinearLayout.LayoutParams(dp(3), dp(18));
-        barLp.rightMargin = dp(11);
-        s.bar.setBackground(UiKit.plate(cAccent(), dp(2)));
-        s.bar.setAlpha(0.25f);
-        head.addView(s.bar, barLp);
+        head.addView(skin.rowTitle(title),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        TextView t = text(title, 14, Typeface.BOLD, cTxP());
-        head.addView(t, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-
-        s.chev = text("›", 17, Typeface.BOLD, cTxS());
-        s.chev.setGravity(Gravity.CENTER);
-        s.chev.setPadding(dp(6), 0, dp(6), 0);
-        head.addView(s.chev, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        s.chev = new Icon(this, Icon.CHEVRON, cTxS());
+        head.addView(s.chev, new LinearLayout.LayoutParams(dp(18), dp(18)));
 
         head.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { toggle(s); }
@@ -929,15 +871,16 @@ public final class MainActivity extends Activity {
         s.group.addView(head, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        s.card = newCard();
+        s.card = new LinearLayout(this);
+        s.card.setOrientation(LinearLayout.VERTICAL);
+        s.card.setPadding(dp(6), 0, dp(6), dp(10));
         s.card.setVisibility(View.GONE);
-        LinearLayout.LayoutParams clp = cardLp();
-        clp.topMargin = dp(8);
-        s.group.addView(s.card, clp);
+        s.group.addView(s.card, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         LinearLayout.LayoutParams glp = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-        glp.topMargin = dp(9);
+        glp.topMargin = dp(8);
         list.addView(s.group, glp);
         secs.add(s);
         return s;
@@ -970,11 +913,6 @@ public final class MainActivity extends Activity {
         s.chev.animate().cancel();
         s.chev.animate().rotation(expand ? 90f : 0f)
                 .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
-        if (s.bar != null) {
-            s.bar.animate().cancel();
-            s.bar.animate().alpha(expand ? 1f : 0.25f)
-                    .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
-        }
 
         if (expand) {
             s.card.setVisibility(View.VISIBLE);
@@ -1147,7 +1085,7 @@ public final class MainActivity extends Activity {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         int p = dp(16);
-        root.setPadding(p, dp(10), p, dp(96));
+        root.setPadding(p, dp(4), p, dp(24));
         sv.addView(root);
         return root;
     }
@@ -1167,7 +1105,6 @@ public final class MainActivity extends Activity {
     private ScrollView buildBaiduPage() {
         ScrollView sv = newPage();
         LinearLayout root = pageRoot(sv);
-        addBmapInfoCard(root);
         LinearLayout mount = newMount();
         root.addView(mount);
         LinearLayout old = list;
@@ -1189,11 +1126,54 @@ public final class MainActivity extends Activity {
                 }
                 if (i == 0) toggle(sec);        // 第一组默认展开
             }
+            // ── 百度 · 省电 / 后台（v2.2.3 新增）──────────────────────────────
+            // 与高德那组对齐：键都是「true = 该行为已被拦截」，所以 label 一律写「关闭…」。
+            // 开关写 bmapclean_config（addBmapSwitch），由 bmapclean.BaiduPower 在安装期读取：
+            // 关掉的档位**一条 hook 都不装**（零开销），代价是改完要强停重开百度地图。
+            Sec power = newDrawer("百度 · 省电 / 后台");
+            addNoteRow(power.card, "开 = 该行为已被拦截（默认全开）；关 = 恢复百度原生行为。"
+                    + "改动后需**强制停止并重开百度地图**才生效。");
+            addBmapSwitch(power.card, "关闭推送长连接（硬档，省电最多）",
+                    io.github.ldxm666.bmapclean.Cfg.K_PUSH_HARD_OFF,
+                    "关掉后百度推送（活动 / 提醒）会恢复，但推送连接与周期闹钟会重新占用 CPU。");
+            addBmapSwitch(power.card, "关闭推送消息处理",
+                    io.github.ldxm666.bmapclean.Cfg.K_PUSH_OFF,
+                    "不建连接、不处理推送消息，但不杀服务。");
+            addBmapSwitch(power.card, "关闭推送服务（激进档）",
+                    io.github.ldxm666.bmapclean.Cfg.K_PUSH_KILL_OFF,
+                    "通道服务起来即退出。若发现耗电反而上升，先关这一项。");
+            addBmapSwitch(power.card, "关闭后台常驻服务",
+                    io.github.ldxm666.bmapclean.Cfg.K_BG_SERVICE_OFF,
+                    "定位 / 云控 / 统计等自启动服务不再常驻。");
+            addBmapSwitch(power.card, "关闭后台周期任务",
+                    io.github.ldxm666.bmapclean.Cfg.K_TIMER_OFF,
+                    "AlarmManager / JobScheduler / WorkManager 的定时唤醒不再重排。");
+            addBmapSwitch(power.card, "关闭桌面小组件刷新",
+                    io.github.ldxm666.bmapclean.Cfg.K_WIDGET_OFF,
+                    "只拦 APPWIDGET_UPDATE，添加 / 删除组件仍正常。");
+            addBmapSwitch(power.card, "关闭第三方埋点",
+                    io.github.ldxm666.bmapclean.Cfg.K_TRACK_OFF,
+                    "统计 / 广告 SDK 不初始化，不上报。");
         } finally {
             list = old;
         }
         addVersionFooter(root, "首页开关：强停百度地图后重开即可生效；"
                 + "「我的」页开关：关掉后重开该页即生效（数据层/JS 层在页面加载时读配置）");
+        TextView reset = skin.text("全部恢复显示（清空百度侧配置）", 12f, Skin.REGULAR, cDotBad());
+        reset.setGravity(Gravity.CENTER);
+        reset.setPadding(0, dp(10), 0, dp(6));
+        reset.setBackground(UiKit.rippleBare(cRipple(), dp(12)));
+        reset.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean ok = false;
+                try { ok = io.github.ldxm666.bmapclean.App.resetAll(); } catch (Throwable ignored) {}
+                Toast.makeText(MainActivity.this,
+                        ok ? "已恢复默认，重开百度地图生效" : "LSPosed 服务未连接",
+                        Toast.LENGTH_SHORT).show();
+                if (ok) syncSwitches();
+            }
+        });
+        root.addView(reset, skin.matchWrap());
         return sv;
     }
 
@@ -1201,7 +1181,6 @@ public final class MainActivity extends Activity {
     private ScrollView buildAmapPage() {
         ScrollView sv = newPage();
         LinearLayout root = pageRoot(sv);
-        buildForcedCard(root);          // 去广告（始终开启，不折叠）
         LinearLayout mount = newMount();
         root.addView(mount);
         LinearLayout old = list;
@@ -1265,7 +1244,6 @@ public final class MainActivity extends Activity {
     private ScrollView buildTmapPage() {
         ScrollView sv = newPage();
         LinearLayout root = pageRoot(sv);
-        addTmapInfoCard(root);
         LinearLayout mount = newMount();
         root.addView(mount);
         LinearLayout old = list;
@@ -1325,8 +1303,8 @@ public final class MainActivity extends Activity {
         } finally {
             list = old;
         }
-        addVersionFooter(root, embedded() ? "MapAdKiller v" + Version.NAME + " · 免 root 整合版"
-                : "MapAdKiller v" + Version.NAME + " · 高德 / 百度地图精简");
+        addVersionFooter(root, embedded() ? "MapAdKiller v" + Version.LABEL + " · 免 root 整合版"
+                : "MapAdKiller v" + Version.LABEL + " · 高德 / 百度地图精简");
         return sv;
     }
 
@@ -1418,8 +1396,6 @@ public final class MainActivity extends Activity {
         if (s.chev != null) s.chev.animate().cancel();
         if (s.chev != null) s.chev.animate().rotation(90f)
                 .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
-        if (s.bar != null) s.bar.animate().alpha(1f)
-                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
     }
 
     private void collapse(Sec s) {
@@ -1428,8 +1404,6 @@ public final class MainActivity extends Activity {
         if (s.chev != null) s.chev.animate().cancel();
         if (s.chev != null) s.chev.animate().rotation(0f)
                 .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.SPRING).start();
-        if (s.bar != null) s.bar.animate().alpha(0.25f)
-                .setDuration(UiKit.DUR_BASE).setInterpolator(UiKit.STANDARD).start();
         s.card.animate().alpha(0f).setDuration(UiKit.DUR_BASE)
                 .setInterpolator(UiKit.ACCELERATE)
                 .withEndAction(new Runnable() {
@@ -1519,7 +1493,7 @@ public final class MainActivity extends Activity {
     private void addBmapSwitch(final LinearLayout card, String title, final String key, String note) {
         LinearLayout row = newSwitchRow(card, key, title, note);
         TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setPadding(0, dp(11), dp(10), dp(11));
         label.setLineSpacing(0, 1.15f);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -1573,7 +1547,7 @@ public final class MainActivity extends Activity {
     private void addTmapSwitch(final LinearLayout card, String title, final String key, String note) {
         LinearLayout row = newSwitchRow(card, key, title, note);
         TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setPadding(0, dp(11), dp(10), dp(11));
         label.setLineSpacing(0, 1.15f);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -1767,7 +1741,7 @@ public final class MainActivity extends Activity {
         sb.append("\n");
         sb.append("作用域：").append(state.scopeKnown ? joinScope(state) : "读取失败");
         sb.append("\n");
-        sb.append("本机版本：v").append(Version.NAME);
+        sb.append("本机版本：v").append(Version.LABEL);
         String latest = UpdateChecker.latest(this);
         if (latest != null && latest.length() > 0) sb.append("　最新：v").append(latest);
         sb.append("\n");
@@ -1873,7 +1847,7 @@ public final class MainActivity extends Activity {
                                     String negText, Runnable negAction) {
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(glass(GLASS_R));
+        box.setBackground(skin.glassFor(box, GLASS_R));
         int pad = dp(20);
         box.setPadding(pad, dp(18), pad, dp(10));
         TextView tv = text(title, 18, Typeface.BOLD, cTxP());
@@ -1968,23 +1942,88 @@ public final class MainActivity extends Activity {
     private void showConfigMore() {
         glassDialog("导入 / 导出",
                 "导出：生成配置文本并分享（可发给自己 / 存文件）\n" +
-                "导入：粘贴配置文本恢复",
+                "导入：粘贴配置文本恢复\n" +
+                "文件：直接读写 .json 文件（推荐，跨设备迁移用这个）",
                 "导出", new Runnable() {
                     @Override public void run() { exportConfig(); }
                 },
                 "导入", new Runnable() {
                     @Override public void run() { importConfig(); }
                 },
+                "文件…", new Runnable() {
+                    @Override public void run() { showConfigFile(); }
+                });
+    }
+
+    /** 「文件…」二级菜单：真正的 .json 文件读写（系统文件选择器）。 */
+    private void showConfigFile() {
+        glassDialog("配置文件（.json）",
+                "导出到文件：把" + settingsTargetLabel() + "的开关写成一个 .json，存到手机任意位置\n" +
+                "从文件导入：选一个 .json，先预览将覆盖多少项，确认后才写入",
+                "导出到文件", new Runnable() {
+                    @Override public void run() {
+                        ConfigBackup.bind(configStore(), configSchema(), getPackageName());
+                        ConfigBackup.startExport(MainActivity.this, ConfigBackup.REQ_EXPORT);
+                        String err = ConfigBackup.takeError();
+                        if (err != null) Toast.makeText(MainActivity.this, err, Toast.LENGTH_SHORT).show();
+                    }
+                },
+                "从文件导入", new Runnable() {
+                    @Override public void run() {
+                        ConfigBackup.bind(configStore(), configSchema(), getPackageName());
+                        ConfigBackup.startImport(MainActivity.this, ConfigBackup.REQ_IMPORT);
+                        String err = ConfigBackup.takeError();
+                        if (err != null) Toast.makeText(MainActivity.this, err, Toast.LENGTH_SHORT).show();
+                    }
+                },
                 "恢复默认", new Runnable() {
                     @Override public void run() {
                         glassDialog("恢复默认？", "恢复" + settingsTargetLabel() + "的默认开关，强停地图 App 后生效。",
                                 "恢复默认", new Runnable() {
-                                    @Override public void run() {
-                                        resetConfig();
-                                    }
+                                    @Override public void run() { resetConfig(); }
                                 }, null, null, "取消", null);
                     }
                 });
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, android.content.Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == ConfigBackup.REQ_EXPORT) {
+            String message = ConfigBackup.handleExportResult(this, requestCode, resultCode, data);
+            toast(message);
+            setBackupStatus(message, !message.startsWith("已导出"));
+        } else if (requestCode == ConfigBackup.REQ_IMPORT) {
+            String message = ConfigBackup.handleImportResult(this, requestCode, resultCode, data);
+            if (ConfigBackup.hasPendingImport()) {
+                String detail = ConfigBackup.pendingSummary();
+                glassDialog("确认导入？",
+                        message + (detail.length() == 0 ? "" : "\n\n" + detail)
+                                + "\n\n确认后会覆盖同名配置，地图 App 需强停重开才生效。",
+                        "导入", new Runnable() {
+                            @Override public void run() {
+                                String result = ConfigBackup.confirmImport();
+                                toast(result);
+                                setBackupStatus(result, !result.startsWith("已导入"));
+                                syncAllSwitches();
+                            }
+                        }, null, null, "取消", null);
+            } else {
+                toast(message);
+                setBackupStatus(message, !message.startsWith("已取消"));
+            }
+        }
+    }
+
+    /** 空文案不弹（ConfigBackup 在用户取消时返回空串）。 */
+    private void toast(String s) {
+        if (s == null || s.length() == 0) return;
+        Toast.makeText(this, s, Toast.LENGTH_LONG).show();
+    }
+
+    /** 导入后把界面上的开关状态拉回与配置一致。 */
+    private void syncAllSwitches() {
+        try { syncSwitches(); } catch (Throwable ignored) { }
     }
 
     private Map<String, java.util.Set<String>> configSchema() {
@@ -2119,7 +2158,7 @@ public final class MainActivity extends Activity {
         }
         LinearLayout box = new LinearLayout(this);
         box.setOrientation(LinearLayout.VERTICAL);
-        box.setBackground(glass(GLASS_R));
+        box.setBackground(skin.glassFor(box, GLASS_R));
         int pad = dp(20);
         box.setPadding(pad, dp(18), pad, dp(10));
         box.addView(text("导入配置", 18, Typeface.BOLD, cTxP()));
@@ -2277,10 +2316,10 @@ public final class MainActivity extends Activity {
     private LinearLayout newCard() {
         LinearLayout card = new LinearLayout(this);
         card.setOrientation(LinearLayout.VERTICAL);
-        card.setBackground(glass(22));
-        card.setPadding(dp(10), dp(4), dp(10), dp(4));
-        card.setElevation(0);
-        UiKit.clipRounded(card, dp(22));
+        card.setBackground(skin.glassFor(card, 20));
+        card.setPadding(dp(8), dp(6), dp(8), dp(6));
+        UiKit.clipRounded(card, dp(20));
+        skin.shadow(card, 3f);
         return card;
     }
 
@@ -2293,7 +2332,7 @@ public final class MainActivity extends Activity {
 
     private View divider() {
         View d = new View(this);
-        d.setBackgroundColor(dark ? 0x14FFFFFF : 0x0F000000);
+        d.setBackgroundColor(skin == null ? 0x0F000000 : skin.divider);
         d.setLayoutParams(new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, dp(1))));
         return d;
@@ -2305,9 +2344,9 @@ public final class MainActivity extends Activity {
         LinearLayout row = new LinearLayout(this);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(60));
-        row.setPadding(dp(6), 0, dp(6), 0);
-        row.setBackground(UiKit.rippleBare(cRipple(), dp(14)));
+        row.setMinimumHeight(dp(56));
+        row.setPadding(dp(8), dp(2), dp(8), dp(2));
+        row.setBackground(UiKit.rippleBare(cRipple(), dp(12)));
         return row;
     }
 
@@ -2335,7 +2374,7 @@ public final class MainActivity extends Activity {
         LinearLayout row = newSwitchRow(card, key, title, null);
 
         TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setPadding(0, dp(11), dp(10), dp(11));
         label.setLineSpacing(0, 1.15f);
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
@@ -2373,7 +2412,7 @@ public final class MainActivity extends Activity {
         LinearLayout row = newRow(card);
 
         TextView label = text(title, 14.5f, Typeface.NORMAL, cTxP());
-        label.setPadding(0, dp(14), dp(10), dp(14));
+        label.setPadding(0, dp(11), dp(10), dp(11));
         row.addView(label, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         final GlassSwitch sw = makeSwitch();
@@ -2466,24 +2505,929 @@ public final class MainActivity extends Activity {
 
     /** 说明文字：左侧细色条 + 淡色正文，与开关行区分开 */
     private void addNoteRow(LinearLayout card, String s) {
-        LinearLayout wrap = new LinearLayout(this);
-        wrap.setOrientation(LinearLayout.HORIZONTAL);
-        wrap.setPadding(dp(6), dp(12), dp(6), dp(12));
-
-        View rule = new View(this);
-        LinearLayout.LayoutParams ruleLp = new LinearLayout.LayoutParams(dp(2),
-                ViewGroup.LayoutParams.MATCH_PARENT);
-        ruleLp.rightMargin = dp(10);
-        rule.setBackground(UiKit.plate(dark ? 0x33FFFFFF : 0x1F000000, dp(1)));
-        wrap.addView(rule, ruleLp);
-
-        TextView t = text(s, 12.5f, Typeface.NORMAL, cTxS());
-        t.setLineSpacing(dp(2), 1.18f);
-        wrap.addView(t, new LinearLayout.LayoutParams(
-                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
-        card.addView(wrap, new LinearLayout.LayoutParams(
+        // A hint belongs to the row above, so it is a quiet 12 sp line, not its own entry.
+        TextView t = skin.text(s, 12f, Skin.REGULAR, cTxS());
+        t.setLineSpacing(dp(2), 1.25f);
+        t.setPadding(dp(16), dp(2), dp(16), dp(10));
+        card.addView(t, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
     }
+
+    // ══════════════════════════════════════════════════════════════════════
+    // 版式：底部标签栏 + 首页 / 配置 / 备份 / 关于 四页
+    // ══════════════════════════════════════════════════════════════════════
+    //
+    // 设计基线（见 Skin.java）：
+    //   · 4/8/12/16/20/24/32 间距阶梯，卡片 20 dp 圆角 + 1 px 描边；
+    //   · 每屏一个强调色（蓝），状态色只用于状态点；
+    //   · 页面标题 26 sp / 卡片标题 15 sp / 正文 13.5 sp / 注释 12 sp / 标签 11 sp。
+    // 信息架构：顶部原先那整块（标题 / 状态 / 三格指标 / 更新行）整体搬进首页；
+    // 三个地图的开关页收进「配置」；配置文件的读写独立成「备份」；链接与通用设置进「关于」。
+
+    private static final int TAB_HOME = 0, TAB_CONFIG = 1, TAB_BACKUP = 2, TAB_ABOUT = 3;
+
+    private Skin skin;
+    private FrameLayout contentHost;
+    private View configScreen;
+    private ScrollView homePage;
+    private ScrollView backupPage;
+    private ScrollView aboutPage;
+    private FrameLayout configHost;
+    private final List<ScrollView> appPages = new ArrayList<ScrollView>();
+    private final List<Integer> appPageIds = new ArrayList<Integer>();
+    private final List<TextView> appChips = new ArrayList<TextView>();
+    private LinearLayout navBar;
+    private final List<LinearLayout> navItems = new ArrayList<LinearLayout>();
+    private final List<Icon> navIcons = new ArrayList<Icon>();
+    private final List<TextView> navLabels = new ArrayList<TextView>();
+    private int tabIndex = TAB_HOME;
+    private boolean homeAnimated;
+    private int appIndex = 0;
+    private TextView backupStatus;
+    private TextView configSummary;
+
+    /* ────────────────────────────────────────────────────────────── 首页 */
+
+    private ScrollView buildHomePage() {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setClipToPadding(false);
+        sv.setVerticalScrollBarEnabled(false);
+
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(skin.dp(Skin.S5), skin.dp(Skin.S3), skin.dp(Skin.S5), skin.dp(Skin.S7));
+        sv.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        // 标题行：品牌 + 版本胶囊
+        LinearLayout top = new LinearLayout(this);
+        top.setOrientation(LinearLayout.HORIZONTAL);
+        top.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout brand = new LinearLayout(this);
+        brand.setOrientation(LinearLayout.VERTICAL);
+        brand.addView(skin.display("MapAdKiller"));
+        TextView tagline = skin.caption(embedded()
+                ? "地图广告净化 · 免 root 整合版"
+                : "地图广告净化 · LSPosed 模块");
+        LinearLayout.LayoutParams tagLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tagLp.topMargin = skin.dp(3);
+        brand.addView(tagline, tagLp);
+        top.addView(brand, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        top.addView(skin.chip("v" + Version.LABEL, skin.accentSoft, skin.accent));
+        top.setPadding(skin.dp(Skin.S2), skin.dp(Skin.S1), skin.dp(Skin.S2), skin.dp(Skin.S2));
+        top.setBackground(skin.headerScrim());
+        root.addView(top, skin.matchWrap());
+
+        // 状态卡：这一块就是原来屏幕顶部的那一整块，只是挪到了首页
+        LinearLayout status = new LinearLayout(this);
+        status.setOrientation(LinearLayout.VERTICAL);
+        status.setPadding(skin.dp(18), skin.dp(18), skin.dp(18), skin.dp(14));
+        status.setBackground(skin.glassFor(status, Skin.R_CARD,
+                UiKit.blend(skin.glassTint(), skin.accent, 0.08f)));
+        UiKit.clipRounded(status, skin.dp(Skin.R_CARD));
+        skin.shadow(status, 6f);
+        status.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showStatusDetail(); }
+        });
+        UiKit.pressable(status, 0.995f);
+
+        LinearLayout statusTop = new LinearLayout(this);
+        statusTop.setOrientation(LinearLayout.HORIZONTAL);
+        statusTop.setGravity(Gravity.CENTER_VERTICAL);
+
+        navPill = new LinearLayout(this);
+        navPill.setOrientation(LinearLayout.HORIZONTAL);
+        navPill.setGravity(Gravity.CENTER_VERTICAL);
+        LinearLayout.LayoutParams dotLp = new LinearLayout.LayoutParams(skin.dp(8), skin.dp(8));
+        dotLp.rightMargin = skin.dp(7);
+        dotLp.gravity = Gravity.CENTER_VERTICAL;
+        navPill.addView(dot(skin.success, 8), dotLp);
+        statusPillText = skin.text("连接中", 20f, Skin.BOLD, skin.text);
+        navPill.addView(statusPillText);
+        statusTop.addView(navPill, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        LinearLayout detail = new LinearLayout(this);
+        detail.setOrientation(LinearLayout.HORIZONTAL);
+        detail.setGravity(Gravity.CENTER_VERTICAL);
+        detail.addView(skin.text("运行状态", Skin.T_CAPTION, Skin.MEDIUM, skin.accent));
+        Icon chev = new Icon(this, Icon.CHEVRON, skin.accent);
+        LinearLayout.LayoutParams chevLp = new LinearLayout.LayoutParams(skin.dp(15), skin.dp(15));
+        chevLp.leftMargin = skin.dp(2);
+        detail.addView(chev, chevLp);
+        statusTop.addView(detail);
+        status.addView(statusTop, skin.matchWrap());
+
+        statusView = skin.text("", Skin.T_CAPTION + 0.5f, Skin.REGULAR, skin.text2);
+        statusView.setLineSpacing(skin.dp(2), 1.15f);
+        LinearLayout.LayoutParams stLp = skin.matchWrap();
+        stLp.topMargin = skin.dp(7);
+        status.addView(statusView, stLp);
+
+        View hair = new View(this);
+        hair.setBackgroundColor(skin.stroke);
+        LinearLayout.LayoutParams hairLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, Math.max(1, skin.dp(1)));
+        hairLp.topMargin = skin.dp(14);
+        status.addView(hair, hairLp);
+
+        metricRow = new LinearLayout(this);
+        metricRow.setOrientation(LinearLayout.HORIZONTAL);
+        LinearLayout.LayoutParams mrlp = skin.matchWrap();
+        mrlp.topMargin = skin.dp(12);
+        status.addView(metricRow, mrlp);
+        buildHomeMetrics();
+        root.addView(status, withTop(skin, Skin.S4));
+
+        // 更新卡
+        LinearLayout update = skin.card();
+        LinearLayout updateRow = new LinearLayout(this);
+        updateRow.setOrientation(LinearLayout.HORIZONTAL);
+        updateRow.setGravity(Gravity.CENTER_VERTICAL);
+        updateRow.addView(iconTile(Icon.REFRESH, skin.accent, skin.accentSoft), fixed(skin, 38, 38));
+        LinearLayout updateText = new LinearLayout(this);
+        updateText.setOrientation(LinearLayout.VERTICAL);
+        updateText.addView(skin.rowTitle("版本更新"));
+        verLine = skin.text("当前版本 v" + Version.LABEL, Skin.T_CAPTION, Skin.REGULAR, skin.text2);
+        verLine.setSingleLine(true);
+        verLine.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams vlp = skin.matchWrap();
+        vlp.topMargin = skin.dp(2);
+        updateText.addView(verLine, vlp);
+        LinearLayout.LayoutParams utlp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        utlp.leftMargin = skin.dp(12);
+        updateRow.addView(updateText, utlp);
+        updateBtn = skin.textButton("检查");
+        updateBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (UpdateChecker.isOutdated(MainActivity.this)) {
+                    showUpdateDialog(UpdateChecker.latest(MainActivity.this));
+                    return;
+                }
+                Toast.makeText(MainActivity.this, "正在检查更新…", Toast.LENGTH_SHORT).show();
+                UpdateChecker.check(MainActivity.this, true, updateCb);
+            }
+        });
+        updateRow.addView(updateBtn);
+        update.addView(updateRow, skin.matchWrap());
+        root.addView(update, withTop(skin, Skin.S3));
+
+        // 应用入口
+        skin.addSection(root, "应用");
+        LinearLayout apps = skin.listCard();
+        apps.addView(appRow("com.baidu.BaiduMap", "百度地图", 0));
+        apps.addView(skin.hairline());
+        apps.addView(appRow("com.autonavi.minimap", "高德地图", 1));
+        apps.addView(skin.hairline());
+        apps.addView(appRow("com.tencent.map", "腾讯地图", 2));
+        root.addView(apps, skin.matchWrap());
+
+        // 作者与链接
+        skin.addSection(root, "作者");
+        root.addView(buildAuthorCard(), skin.matchWrap());
+
+        TextView foot = skin.footnote("免费开源 · 禁止倒卖 · MapAdKiller v" + Version.LABEL);
+        foot.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams flp = skin.matchWrap();
+        flp.topMargin = skin.dp(Skin.S6);
+        root.addView(foot, flp);
+
+        adLine = skin.footnote("");
+        adLine.setVisibility(View.GONE);
+        renderVersionLines();
+        return sv;
+    }
+
+    /** 三格指标（版本 / 作用域 / 广告 SDK）：继续复用 refreshMetrics() 的刷新契约。 */
+    private void buildHomeMetrics() {
+        if (metricRow == null) return;
+        metricRow.removeAllViews();
+        metricRow.addView(homeMetric("版本"), weightLp(0));
+        metricRow.addView(homeMetric("作用域"), weightLp(1));
+        metricRow.addView(homeMetric("广告 SDK"), weightLp(2));
+    }
+
+    private View homeMetric(String label) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        TextView value = skin.text("—", 19f, Skin.BOLD, skin.text);
+        value.setSingleLine(true);
+        value.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        box.addView(value);
+        TextView name = skin.text(label, Skin.T_LABEL, Skin.REGULAR, skin.text2);
+        LinearLayout.LayoutParams nlp = skin.matchWrap();
+        nlp.topMargin = skin.dp(2);
+        box.addView(name, nlp);
+        box.setTag(value);
+        box.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showStatusDetail(); }
+        });
+        return box;
+    }
+
+    private LinearLayout.LayoutParams weightLp(int index) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        if (index > 0) lp.leftMargin = skin.dp(Skin.S4);
+        return lp;
+    }
+
+    private LinearLayout appRow(final String pkg, final String label, final int vendor) {
+        LinearLayout row = skin.row();
+        row.addView(appIcon(pkg, label), fixedMargin(skin, 42, 42, 12));
+
+        int count = vendor == 0 ? bmapSwitches.size() : vendor == 1 ? switches.size() : tmapSwitches.size();
+        String version = installedVersion(pkg);
+        String recommended = recommendedVersion(pkg);
+        String caption = "推荐 " + (recommended == null ? "—" : recommended);
+        if (version == null) caption += embedded() ? " · 未安装" : " · 本机未安装";
+        else caption += " · 本机 " + version + (count > 0 ? " · " + count + " 项" : "");
+        row.addView(skin.rowText(label, caption), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        Icon chev = new Icon(this, Icon.CHEVRON, skin.text3);
+        row.addView(chev, fixed(skin, 18, 18));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showTab(TAB_CONFIG, true);
+                selectApp(vendor);
+            }
+        });
+        UiKit.pressable(row, 0.99f);
+        return row;
+    }
+
+    /** 模块当前验证过的目标版本（Version.TARGETS 是唯一事实源）。 */
+    private String recommendedVersion(String pkg) {
+        // Recommendation follows the build actually installed on this device: the module
+        // is verified against that build, so showing a hard-coded version that differs
+        // from the phone just makes the row look wrong.
+        String installed = installedVersion(pkg);
+        if (installed != null && installed.length() > 0) return installed;
+        for (int i = 0; i < Version.TARGETS.length; i++) {
+            if (Version.TARGETS[i][0].equals(pkg)) return Version.TARGETS[i][2];
+        }
+        return null;
+    }
+
+    /** 装了的应用用真实图标，没装用首字色块，避免一行出现两个空白方块。 */
+    private View appIcon(String pkg, String label) {
+        FrameLayout box = new FrameLayout(this);
+        Drawable icon = null;
+        try { icon = getPackageManager().getApplicationIcon(pkg); } catch (Throwable ignored) { }
+        if (icon != null) {
+            ImageView image = new ImageView(this);
+            image.setImageDrawable(icon);
+            image.setScaleType(ImageView.ScaleType.FIT_CENTER);
+            box.addView(image, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } else {
+            TextView letter = skin.text(label.substring(0, 1), 16f, Skin.MEDIUM, skin.text2);
+            letter.setGravity(Gravity.CENTER);
+            box.setBackground(skin.solid(skin.chipBg, 11));
+            box.addView(letter, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        UiKit.clipRounded(box, skin.dp(11));
+        return box;
+    }
+
+    private LinearLayout buildAuthorCard() {
+        LinearLayout card = skin.listCard();
+        LinearLayout who = new LinearLayout(this);
+        who.setOrientation(LinearLayout.HORIZONTAL);
+        who.setGravity(Gravity.CENTER_VERTICAL);
+        who.setPadding(skin.dp(Skin.S2), skin.dp(Skin.S2), skin.dp(Skin.S2), skin.dp(Skin.S2));
+
+        ImageView avatar = new ImageView(this);
+        Drawable face = AvatarAsset.drawable(this);
+        if (face != null) avatar.setImageDrawable(face);
+        LinearLayout.LayoutParams avLp = new LinearLayout.LayoutParams(skin.dp(44), skin.dp(44));
+        avLp.rightMargin = skin.dp(Skin.S3);
+        who.addView(avatar, avLp);
+        UiKit.clipRounded(avatar, skin.dp(22));
+
+        who.addView(skin.rowText("ldxm666", "开源作者 · 地图广告净化"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        card.addView(who);
+        card.addView(skin.hairline());
+
+        GithubMark mark = new GithubMark(this);
+        mark.setColor(skin.text);
+        card.addView(linkRow(mark, "GitHub 主页", "github.com/ldxm666", Version.REPO));
+        card.addView(skin.hairline());
+        Icon send = new Icon(this, Icon.SEND, skin.accent);
+        card.addView(linkRow(send, "Telegram 群组", "t.me/+2rqisPe5tJxjNTk1", Version.TG));
+        return card;
+    }
+
+    private LinearLayout linkRow(View icon, String title, String subtitle, final String url) {
+        LinearLayout row = skin.row();
+        LinearLayout badge = new LinearLayout(this);
+        badge.setOrientation(LinearLayout.HORIZONTAL);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(skin.solid(skin.chipBg, 10));
+        badge.addView(icon, fixed(skin, 18, 18));
+        row.addView(badge, fixedMargin(skin, 38, 38, 12));
+        row.addView(skin.rowText(title, subtitle), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        Icon chev = new Icon(this, Icon.EXTERNAL, skin.text3);
+        row.addView(chev, fixed(skin, 16, 16));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { openUrl(url); }
+        });
+        return row;
+    }
+
+    private View iconTile(int kind, int color, int fill) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.HORIZONTAL);
+        box.setGravity(Gravity.CENTER);
+        box.setBackground(skin.solid(fill, 11));
+        box.addView(new Icon(this, kind, color), fixed(skin, 20, 20));
+        return box;
+    }
+
+    private static LinearLayout.LayoutParams fixed(Skin s, int wDp, int hDp) {
+        return new LinearLayout.LayoutParams(s.dp(wDp), s.dp(hDp));
+    }
+
+    private static LinearLayout.LayoutParams fixedMargin(Skin s, int wDp, int hDp, int rightDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(s.dp(wDp), s.dp(hDp));
+        lp.rightMargin = s.dp(rightDp);
+        return lp;
+    }
+
+    private static LinearLayout.LayoutParams withTop(Skin s, int topDp) {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = s.dp(topDp);
+        return lp;
+    }
+
+    /* ──────────────────────────────────────────────────────────── 配置页 */
+
+    private View buildConfigPage() {
+        LinearLayout screen = new LinearLayout(this);
+        screen.setOrientation(LinearLayout.VERTICAL);
+        screen.setBackgroundColor(0x00000000);
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.setPadding(skin.dp(Skin.S5), skin.dp(Skin.S3), skin.dp(Skin.S5), 0);
+        head.addView(skin.display("配置"));
+        TextView sub = skin.caption("按应用调整模块开关");
+        LinearLayout.LayoutParams subLp = skin.matchWrap();
+        subLp.topMargin = skin.dp(3);
+        head.addView(sub, subLp);
+        head.setBackground(skin.headerScrim());
+        screen.addView(head, skin.matchWrap());
+
+        LinearLayout segment = new LinearLayout(this);
+        segment.setOrientation(LinearLayout.HORIZONTAL);
+        segment.setPadding(skin.dp(4), skin.dp(4), skin.dp(4), skin.dp(4));
+        segment.setBackground(skin.solid(skin.surface2, Skin.R_INNER));
+        if (embedded()) {
+            addAppChip(segment, embeddedAmap() ? "高德地图" : "百度地图");
+        } else {
+            addAppChip(segment, "百度地图");
+            addAppChip(segment, "高德地图");
+            addAppChip(segment, "腾讯地图");
+        }
+        LinearLayout.LayoutParams segLp = skin.matchWrap();
+        segLp.topMargin = skin.dp(Skin.S4);
+        segLp.leftMargin = skin.dp(Skin.S5);
+        segLp.rightMargin = skin.dp(Skin.S5);
+        screen.addView(segment, segLp);
+
+        configSummary = skin.footnote("");
+        LinearLayout.LayoutParams cslp = skin.matchWrap();
+        cslp.topMargin = skin.dp(Skin.S3);
+        cslp.leftMargin = skin.dp(Skin.S5 + 2);
+        cslp.rightMargin = skin.dp(Skin.S5);
+        screen.addView(configSummary, cslp);
+
+        View searchBar = finder.bar();
+        LinearLayout.LayoutParams searchLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, skin.dp(44));
+        searchLp.topMargin = skin.dp(Skin.S3);
+        searchLp.leftMargin = skin.dp(Skin.S5);
+        searchLp.rightMargin = skin.dp(Skin.S5);
+        screen.addView(searchBar, searchLp);
+        screen.addView(finder.resultsHost(), skin.matchWrap());
+
+        configHost = new FrameLayout(this);
+        LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f);
+        hostLp.topMargin = skin.dp(Skin.S2);
+        screen.addView(configHost, hostLp);
+
+        if (embedded()) {
+            addAppPage(embeddedAmap() ? buildAmapPage() : buildBaiduPage(),
+                    embeddedAmap() ? PAGE_AMAP : PAGE_BAIDU);
+        } else {
+            addAppPage(buildBaiduPage(), PAGE_BAIDU);
+            addAppPage(buildAmapPage(), PAGE_AMAP);
+            addAppPage(buildTmapPage(), PAGE_TMAP);
+        }
+        selectApp(0);
+        return screen;
+    }
+
+    private void addAppChip(LinearLayout segment, String label) {
+        final int index = appChips.size();
+        TextView chip = skin.text(label, Skin.T_CAPTION + 0.5f, Skin.MEDIUM, skin.text2);
+        chip.setGravity(Gravity.CENTER);
+        chip.setClickable(true);
+        chip.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { selectApp(index); }
+        });
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                0, skin.dp(38), 1f);
+        if (index > 0) lp.leftMargin = skin.dp(2);
+        segment.addView(chip, lp);
+        appChips.add(chip);
+    }
+
+    private void addAppPage(ScrollView page, int pageId) {
+        page.setVisibility(View.GONE);
+        appPages.add(page);
+        appPageIds.add(pageId);
+        configHost.addView(page, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+    }
+
+    /** 切换地图应用（0 百度 / 1 高德 / 2 腾讯；内置版只有一个，下标恒为 0）。 */
+    private void selectApp(int index) {
+        if (index < 0 || index >= appPages.size()) return;
+        appIndex = index;
+        for (int i = 0; i < appPages.size(); i++) {
+            appPages.get(i).setVisibility(i == index ? View.VISIBLE : View.GONE);
+        }
+        for (int i = 0; i < appChips.size(); i++) {
+            TextView chip = appChips.get(i);
+            boolean on = i == index;
+            chip.setTextColor(on ? skin.accent : skin.text2);
+            chip.setTypeface(on ? Skin.MEDIUM : Skin.REGULAR);
+            chip.setBackground(on ? skin.border(skin.surface, skin.stroke, 11) : null);
+            if (on) {
+                chip.setScaleX(0.96f);
+                chip.setScaleY(0.96f);
+                chip.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(220L).setInterpolator(UiKit.SPRING).start();
+            }
+        }
+        if (configSummary != null && index < appChips.size() && index < appPageIds.size()) {
+            int pageId = appPageIds.get(index);
+            int count = pageId == PAGE_BAIDU ? bmapSwitches.size()
+                    : pageId == PAGE_AMAP ? switches.size() : tmapSwitches.size();
+            configSummary.setText(appChips.get(index).getText() + " · " + count + " 项开关");
+        }
+        if (tabIndex == TAB_CONFIG && finder != null) {
+            finder.attach(appPageIds.get(index));
+        }
+    }
+
+    /* ──────────────────────────────────────────────────── 底部标签栏 */
+
+    private LinearLayout buildBottomNav() {
+        navBar = new LinearLayout(this);
+        navBar.setOrientation(LinearLayout.VERTICAL);
+        navBar.setBackgroundColor(0x00000000);
+        navBar.setPadding(skin.dp(16), skin.dp(6), skin.dp(16), skin.dp(10));
+
+        LinearLayout pill = new LinearLayout(this);
+        pill.setOrientation(LinearLayout.HORIZONTAL);
+        pill.setPadding(skin.dp(8), skin.dp(6), skin.dp(8), skin.dp(6));
+        pill.setBackground(skin.glassFor(pill, 26));
+        UiKit.clipRounded(pill, skin.dp(26));
+        skin.shadow(pill, 10f);
+        navBar.addView(pill, skin.matchWrap());
+
+        addNavItem(pill, Icon.HOME, "首页");
+        addNavItem(pill, Icon.TUNE, "配置");
+        addNavItem(pill, Icon.ARCHIVE, "备份");
+        addNavItem(pill, Icon.INFO, "关于");
+        return navBar;
+    }
+
+    private void addNavItem(LinearLayout parent, int kind, String label) {
+        final int index = navItems.size();
+        LinearLayout item = new LinearLayout(this);
+        item.setOrientation(LinearLayout.VERTICAL);
+        item.setGravity(Gravity.CENTER);
+        item.setPadding(0, skin.dp(4), 0, skin.dp(4));
+        item.setBackground(UiKit.rippleBare(dark ? 0x22FFFFFF : 0x0F000000, skin.dp(14)));
+
+        FrameLayout pill = new FrameLayout(this);
+        Icon icon = new Icon(this, kind, skin.text2);
+        FrameLayout.LayoutParams iconLp = new FrameLayout.LayoutParams(
+                skin.dp(22), skin.dp(22), Gravity.CENTER);
+        pill.addView(icon, iconLp);
+        item.addView(pill, new LinearLayout.LayoutParams(skin.dp(46), skin.dp(28)));
+
+        TextView text = skin.text(label, 10.5f, Skin.MEDIUM, skin.text2);
+        LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        tlp.topMargin = skin.dp(2);
+        item.addView(text, tlp);
+
+        item.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showTab(index, true); }
+        });
+        parent.addView(item, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        navItems.add(item);
+        navIcons.add(icon);
+        navLabels.add(text);
+        item.setTag(pill);
+    }
+
+    private void applyNav() {
+        for (int i = 0; i < navItems.size(); i++) {
+            boolean on = i == tabIndex;
+            navIcons.get(i).setColor(on ? skin.accent : skin.text2);
+            navLabels.get(i).setTextColor(on ? skin.accent : skin.text2);
+            navLabels.get(i).setTypeface(on ? Skin.MEDIUM : Skin.REGULAR);
+            navItems.get(i).setBackground(on
+                    ? skin.solid(skin.accentSoft, 16) : null);
+            if (on) {
+                View item = navItems.get(i);
+                item.setScaleX(0.94f);
+                item.setScaleY(0.94f);
+                item.animate().scaleX(1f).scaleY(1f)
+                        .setDuration(260L).setInterpolator(UiKit.SPRING).start();
+                navIcons.get(i).setScaleX(0.86f);
+                navIcons.get(i).setScaleY(0.86f);
+                navIcons.get(i).animate().scaleX(1f).scaleY(1f)
+                        .setDuration(260L).setInterpolator(UiKit.SPRING).start();
+            }
+        }
+    }
+
+    private void showTab(int index, boolean animate) {
+        if (index < TAB_HOME || index > TAB_ABOUT || pager == null) return;
+        pager.setPage(index, animate);
+        if (!animate) onTabShown(index);
+    }
+
+    /** Tab is on screen: refresh the bar, wire the search index, restore scroll state. */
+    private void onTabShown(int index) {
+        tabIndex = index;
+        if (index == TAB_CONFIG) {
+            if (finder != null && appIndex < appPageIds.size()) {
+                finder.attach(appPageIds.get(appIndex));
+            }
+        } else if (finder != null) {
+            finder.dismissKeyboard();
+        }
+        applyNav();
+        if (index == TAB_HOME && !homeAnimated && homePage != null && homePage.getChildCount() > 0) {
+            homeAnimated = true;
+            UiKit.enterStaggered((ViewGroup) homePage.getChildAt(0), skin.dp(12), 32L, 30L);
+        }
+    }
+
+    /* ────────────────────────────────────────────────────────────── 备份页 */
+
+    private ScrollView buildBackupPage() {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setClipToPadding(false);
+        sv.setVerticalScrollBarEnabled(false);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(skin.dp(Skin.S5), skin.dp(Skin.S3), skin.dp(Skin.S5), skin.dp(Skin.S7));
+        sv.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.addView(skin.display("备份"));
+        TextView sub = skin.caption("配置文件 · 快照 · 跨设备迁移");
+        LinearLayout.LayoutParams subLp = skin.matchWrap();
+        subLp.topMargin = skin.dp(3);
+        head.addView(sub, subLp);
+        head.setBackground(skin.headerScrim());
+        root.addView(head, skin.matchWrap());
+
+        backupStatus = skin.text("", Skin.T_CAPTION, Skin.REGULAR, skin.text3);
+        LinearLayout.LayoutParams bslp = skin.matchWrap();
+        bslp.topMargin = skin.dp(Skin.S3);
+        root.addView(backupStatus, bslp);
+
+        // 导出
+        LinearLayout export = skin.card();
+        LinearLayout exportHead = new LinearLayout(this);
+        exportHead.setOrientation(LinearLayout.HORIZONTAL);
+        exportHead.setGravity(Gravity.CENTER_VERTICAL);
+        exportHead.addView(iconTile(Icon.DOWNLOAD, skin.accent, skin.accentSoft), fixed(skin, 40, 40));
+        LinearLayout exportText = new LinearLayout(this);
+        exportText.setOrientation(LinearLayout.VERTICAL);
+        exportText.addView(skin.rowTitle("导出配置文件"));
+        exportText.addView(skin.caption("保存为 .json 文件，可用于备份或迁移到其它设备"));
+        LinearLayout.LayoutParams etLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        etLp.leftMargin = skin.dp(Skin.S3);
+        exportHead.addView(exportText, etLp);
+        export.addView(exportHead, skin.matchWrap());
+
+        TextView exportNote = skin.footnote("将包含全部开关：" + configCounts());
+        LinearLayout.LayoutParams enLp = skin.matchWrap();
+        enLp.topMargin = skin.dp(Skin.S3);
+        export.addView(exportNote, enLp);
+
+        TextView exportBtn = skin.primaryButton("导出 JSON 文件");
+        LinearLayout.LayoutParams ebLp = skin.matchWrap();
+        ebLp.topMargin = skin.dp(Skin.S4);
+        export.addView(exportBtn, ebLp);
+        exportBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                ConfigBackup.bind(configStore(), configSchema(), getPackageName());
+                ConfigBackup.startExport(MainActivity.this, ConfigBackup.REQ_EXPORT);
+                String error = ConfigBackup.takeError();
+                if (error != null) {
+                    setBackupStatus(error, true);
+                } else {
+                    setBackupStatus("已打开系统保存对话框，选择位置即可导出", false);
+                }
+            }
+        });
+        root.addView(export, withTop(skin, Skin.S4));
+
+        // 导入
+        LinearLayout imp = skin.card();
+        LinearLayout impHead = new LinearLayout(this);
+        impHead.setOrientation(LinearLayout.HORIZONTAL);
+        impHead.setGravity(Gravity.CENTER_VERTICAL);
+        impHead.addView(iconTile(Icon.UPLOAD, skin.accent, skin.accentSoft), fixed(skin, 40, 40));
+        LinearLayout impText = new LinearLayout(this);
+        impText.setOrientation(LinearLayout.VERTICAL);
+        impText.addView(skin.rowTitle("导入配置文件"));
+        impText.addView(skin.caption("选择 .json 文件，先预览再写入，不会静默覆盖"));
+        LinearLayout.LayoutParams itLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        itLp.leftMargin = skin.dp(Skin.S3);
+        impHead.addView(impText, itLp);
+        imp.addView(impHead, skin.matchWrap());
+
+        TextView importBtn = skin.secondaryButton("选择 JSON 文件");
+        LinearLayout.LayoutParams ibLp = skin.matchWrap();
+        ibLp.topMargin = skin.dp(Skin.S4);
+        imp.addView(importBtn, ibLp);
+        importBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                ConfigBackup.bind(configStore(), configSchema(), getPackageName());
+                ConfigBackup.startImport(MainActivity.this, ConfigBackup.REQ_IMPORT);
+                String error = ConfigBackup.takeError();
+                if (error != null) setBackupStatus(error, true);
+            }
+        });
+        TextView importHint = skin.footnote("兼容旧版「复制粘贴」的文本：存成 .json 后同样可以导入。");
+        LinearLayout.LayoutParams ihLp = skin.matchWrap();
+        ihLp.topMargin = skin.dp(Skin.S3);
+        imp.addView(importHint, ihLp);
+        root.addView(imp, withTop(skin, Skin.S3));
+
+        // 本机快照
+        LinearLayout snap = skin.card();
+        snap.addView(skin.rowTitle("本机快照"));
+        TextView snapNote = skin.caption("保存在本机；重装应用或清除数据后失效");
+        LinearLayout.LayoutParams snLp = skin.matchWrap();
+        snLp.topMargin = skin.dp(3);
+        snap.addView(snapNote, snLp);
+
+        LinearLayout snapRow = new LinearLayout(this);
+        snapRow.setOrientation(LinearLayout.HORIZONTAL);
+        TextView saveBtn = skin.secondaryButton("保存快照");
+        TextView restoreBtn = skin.secondaryButton("恢复快照");
+        LinearLayout.LayoutParams sbLp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        sbLp.rightMargin = skin.dp(Skin.S2);
+        snapRow.addView(saveBtn, sbLp);
+        snapRow.addView(restoreBtn, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams srLp = skin.matchWrap();
+        srLp.topMargin = skin.dp(Skin.S4);
+        snap.addView(snapRow, srLp);
+        saveBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                saveSnapshot();
+                setBackupStatus("已保存本机快照", false);
+            }
+        });
+        restoreBtn.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (readSnapshot() == null) {
+                    setBackupStatus("还没有保存过快照", true);
+                    return;
+                }
+                glassDialog("恢复快照？", "将覆盖当前全部开关，回到上次保存的快照。",
+                        "恢复", new Runnable() {
+                            @Override public void run() { restoreSnapshot(); }
+                        }, null, null, "取消", null);
+            }
+        });
+        root.addView(snap, withTop(skin, Skin.S3));
+
+        // 高级：文本方式
+        skin.addSection(root, "高级");
+        LinearLayout advanced = skin.listCard();
+        advanced.addView(advancedRow(Icon.COPY, "复制配置文本", "发给其它设备粘贴导入", new Runnable() {
+            @Override public void run() { exportConfig(); }
+        }));
+        advanced.addView(skin.hairline());
+        advanced.addView(advancedRow(Icon.PASTE, "从剪贴板导入", "粘贴旧版文本并预览", new Runnable() {
+            @Override public void run() { importConfig(); }
+        }));
+        root.addView(advanced, skin.matchWrap());
+
+        LinearLayout danger = skin.card();
+        danger.setBackground(skin.glassFor(danger, Skin.R_CARD));
+        danger.addView(advancedRow(Icon.TRASH, "恢复默认设置", "清空本模块写入的开关，回到出厂值",
+                new Runnable() {
+                    @Override public void run() {
+                        glassDialog("恢复默认？", "恢复" + settingsTargetLabel()
+                                        + "的默认开关，强停地图 App 后生效。",
+                                "恢复默认", new Runnable() {
+                                    @Override public void run() { resetConfig(); }
+                                }, null, null, "取消", null);
+                    }
+                }));
+        root.addView(danger, withTop(skin, Skin.S3));
+        return sv;
+    }
+
+    private View advancedRow(int kind, String title, String caption, final Runnable action) {
+        LinearLayout row = skin.row();
+        Icon icon = new Icon(this, kind, skin.text2);
+        row.addView(icon, fixedMargin(skin, 20, 20, 14));
+        row.addView(skin.rowText(title, caption), new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { action.run(); }
+        });
+        return row;
+    }
+
+    private void setBackupStatus(String message, boolean error) {
+        if (backupStatus == null) return;
+        backupStatus.setText(message);
+        backupStatus.setTextColor(error ? skin.danger : skin.text3);
+    }
+
+    private String configCounts() {
+        StringBuilder sb = new StringBuilder();
+        if (!embedded() || !embeddedAmap()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("百度 ").append(bmapSwitches.size()).append(" 项");
+        }
+        if (!embedded() || embeddedAmap()) {
+            if (sb.length() > 0) sb.append(" · ");
+            sb.append("高德 ").append(switches.size()).append(" 项");
+        }
+        if (!embedded()) {
+            sb.append(" · 腾讯 ").append(tmapSwitches.size()).append(" 项");
+        }
+        return sb.toString();
+    }
+
+    /* ────────────────────────────────────────────────────────────── 关于页 */
+
+    private ScrollView buildAboutPage() {
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.setClipToPadding(false);
+        sv.setVerticalScrollBarEnabled(false);
+        LinearLayout root = new LinearLayout(this);
+        root.setOrientation(LinearLayout.VERTICAL);
+        root.setPadding(skin.dp(Skin.S5), skin.dp(Skin.S3), skin.dp(Skin.S5), skin.dp(Skin.S7));
+        sv.addView(root, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout head = new LinearLayout(this);
+        head.setOrientation(LinearLayout.VERTICAL);
+        head.addView(skin.display("关于"));
+        TextView sub = skin.caption("版本信息 · 作者链接 · 通用设置");
+        LinearLayout.LayoutParams subLp = skin.matchWrap();
+        subLp.topMargin = skin.dp(3);
+        head.addView(sub, subLp);
+        head.setBackground(skin.headerScrim());
+        root.addView(head, skin.matchWrap());
+
+        // 应用身份卡
+        LinearLayout identity = skin.card();
+        LinearLayout identityRow = new LinearLayout(this);
+        identityRow.setOrientation(LinearLayout.HORIZONTAL);
+        identityRow.setGravity(Gravity.CENTER_VERTICAL);
+        FrameLayout logo = new FrameLayout(this);
+        Drawable launcher = null;
+        try { launcher = ModuleResources.drawable(this, "ic_launcher"); } catch (Throwable ignored) { }
+        if (launcher != null) {
+            ImageView image = new ImageView(this);
+            image.setImageDrawable(launcher);
+            logo.addView(image, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
+        UiKit.clipRounded(logo, skin.dp(14));
+        identityRow.addView(logo, fixedMargin(skin, 56, 56, 14));
+        LinearLayout nameCol = new LinearLayout(this);
+        nameCol.setOrientation(LinearLayout.VERTICAL);
+        nameCol.addView(skin.title("MapAdKiller"));
+        nameCol.addView(skin.caption("版本 " + Version.LABEL + " · 构建 " + Version.CODE));
+        identityRow.addView(nameCol, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        identityRow.addView(skin.chip(embedded() ? "整合版" : "模块版",
+                skin.accentSoft, skin.accent));
+        identity.addView(identityRow, skin.matchWrap());
+
+        root.addView(identity, withTop(skin, Skin.S4));
+
+        // 支持版本：模块真正验证过的地图版本，和本机安装版本并排显示
+        skin.addSection(root, "支持版本");
+        LinearLayout versions = skin.listCard();
+        boolean firstVersion = true;
+        for (int i = 0; i < Version.TARGETS.length; i++) {
+            final String pkg = Version.TARGETS[i][0];
+            if (embedded() && !pkg.equals(embeddedHost)) continue;
+            if (!firstVersion) versions.addView(skin.hairline());
+            firstVersion = false;
+            LinearLayout row = skin.row();
+            row.setClickable(false);
+            LinearLayout col = new LinearLayout(this);
+            col.setOrientation(LinearLayout.VERTICAL);
+            col.addView(skin.rowTitle(Version.TARGETS[i][1]));
+            TextView rec = skin.caption("推荐版本 " + recommendedVersion(pkg));
+            LinearLayout.LayoutParams recLp = skin.matchWrap();
+            recLp.topMargin = skin.dp(2);
+            col.addView(rec, recLp);
+            row.addView(col, new LinearLayout.LayoutParams(
+                    0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+            String installed = installedVersion(pkg);
+            boolean match = installed != null && installed.startsWith(Version.TARGETS[i][2]);
+            row.addView(skin.chip(installed == null ? "未安装" : (match ? "本机 " + installed : "本机 " + installed),
+                    installed == null ? skin.chipBg : (match ? (dark ? 0x1F34D399 : 0x1416A34A)
+                                                              : (dark ? 0x2AFBBF24 : 0x1AF79009)),
+                    installed == null ? skin.text3 : (match ? skin.success : skin.warn)));
+            versions.addView(row);
+        }
+        root.addView(versions, skin.matchWrap());
+
+        // 链接卡
+        skin.addSection(root, "链接");
+        LinearLayout links = skin.listCard();
+        GithubMark mark = new GithubMark(this);
+        mark.setColor(skin.text);
+        links.addView(linkRow(mark, "GitHub 仓库", "github.com/ldxm666/MapAdKiller", Version.REPO));
+        links.addView(skin.hairline());
+        links.addView(linkRow(new Icon(this, Icon.DOWNLOAD, skin.accent),
+                "版本发布", "最新安装包与更新日志", Version.RELEASES));
+        links.addView(skin.hairline());
+        links.addView(linkRow(new Icon(this, Icon.SEND, skin.accent),
+                "Telegram 群组", "反馈 / 交流 / 第一时间更新", Version.TG));
+        links.addView(skin.hairline());
+        links.addView(linkRow(new Icon(this, Icon.INFO, skin.text2),
+                "问题反馈", "GitHub Issues", Version.ISSUES));
+        root.addView(links, skin.matchWrap());
+
+        // 通用设置
+        skin.addSection(root, "通用");
+        LinearLayout general = newCard();
+        if (embedded()) {
+            addNoteRow(general, "当前为免 root 整合版：设置只作用于本地图，配置保存在本地图的嵌入式模块服务中。");
+            if (embeddedAmap()) addSwitch(general, "调试日志", Config.K_DEBUG_LOG);
+        } else {
+            addLocalSwitch(general, "隐藏桌面图标", App.K_HIDE_ICON);
+            addNoteRow(general, "隐藏后桌面图标消失；LSPosed 管理器里的「打开」入口不受影响，"
+                    + "快捷设置磁贴与 adb 命令也始终可用。");
+            addSwitch(general, "调试日志（框架输出协议适配错误）", Config.K_DEBUG_LOG);
+        }
+        root.addView(general, skin.matchWrap());
+
+        // 说明
+        skin.addSection(root, "说明");
+        LinearLayout note = skin.card();
+        TextView body = skin.body("本模块免费开源，禁止任何形式的倒卖。\n"
+                + "广告与推荐内容的拦截规则随地图版本变化，升级地图后请回来看一眼开关状态。\n"
+                + "遇到问题请带上机型、地图版本与日志到 GitHub Issues 或 Telegram 群反馈。");
+        body.setLineSpacing(skin.dp(3), 1.25f);
+        note.addView(body, skin.matchWrap());
+        root.addView(note, skin.matchWrap());
+
+        TextView foot = skin.footnote("MapAdKiller v" + Version.LABEL + " · 免费开源 · 禁止倒卖");
+        foot.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams flp = skin.matchWrap();
+        flp.topMargin = skin.dp(Skin.S6);
+        root.addView(foot, flp);
+        return sv;
+    }
+
+
+
+
 
     // ---------------------------------------------------------------- 基础工厂
 
