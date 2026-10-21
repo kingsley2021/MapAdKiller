@@ -73,6 +73,14 @@ public final class BaiduHooks {
         // BMAd 开放封装层在这里就挂（provider 类在 install 时已能解析，实测 voided=2）；
         // commonadprovider 的 ADN loader 走上面的懒挂载，见 hookAdSdkOnRequest。
         BaiduSdkBlock.installBmad(cl);
+
+        // UI half runs in the same pass: deferring it moved the cost into the first-frame
+        // window instead of removing it (measured worse), so keep the single install pass.
+        installUi(cl);
+    }
+
+    /** UI-layer hooks, installed shortly after the process is up (see install()). */
+    private static void installUi(ClassLoader cl) throws Exception {
         // The fixed search bar remains reachable when the entire bottom bar is hidden.
         Class<?> searchEntry=H.cls(cl,"com.baidu.baidumaps.aihome.search.DefaultSearchUpUIComponent");
         hook(searchEntry,"getView",chain -> {
