@@ -67,6 +67,15 @@ public final class MainHook {
         // 放在进程分支之前 ⇒ 主进程和所有子进程一起透传（AmapSubprocess 也不装）。
         if (PKG_AMAP.equals(pkg) && Baseline.maybeCapture()) {
             H.log(Log.INFO, TAG, "event=baseline_passthrough process=" + process);
+            // 采集模式（纯官方）也要保留悬浮窗：面板「首页」页那条红/黄/绿提示条要靠它显示，
+            // 否则第一次进来的用户既看不到进度、也找不到「点这里重启启用」的入口。其余 hook 一条不装。
+            if (process == null || !process.contains(":")) {
+                try {
+                    io.github.ldxm666.mapclean.FloatingHooks.install(mod, pkg, true);
+                } catch (Throwable t) {
+                    H.log(Log.WARN, TAG, "event=floating_install_failed process=" + process);
+                }
+            }
             return;
         }
 
