@@ -220,12 +220,53 @@ public final class FloatingConfig {
      * <p>读配置优先：老用户若已显式写过 {@code float_enabled=true}，模块版也照样挂球。
      */
     public static boolean floatEnabled() {
+        // ① 远程/面板通道（正常情况）
         try {
-            if (!hasStored(K_FLOAT_ENABLED)) return floatDefault();
-            return read(K_FLOAT_ENABLED, floatDefault());
+            if (hasStored(K_FLOAT_ENABLED)) {
+                boolean v = read(K_FLOAT_ENABLED, floatDefault());
+                mirrorPut(v);
+                return v;
+            }
+        } catch (Throwable ignored) { }
+        // ② 启动早期框架服务还没绑定 ⇒ hasStored 读不到，会误判成"从未写过"从而回落到默认值
+        //    （默认 true）⇒ 用户明明关掉了，重开 App 球又出现。用本地镜像兜底。
+        Boolean m = mirrorGet();
+        if (m != null) return m.booleanValue();
+        // ③ 真正从未写过
+        return floatDefault();
+    }
+
+    // ── 本地镜像：把「用户最后一次显式选择」记在宿主进程自己的 SharedPreferences 里 ──
+    // 远程通道（LSPatch/LSPosed 的 getRemotePreferences）在进程刚起来时可能还不可用，
+    // 那一刻读不到值就会回落到默认值，导致「关掉的悬浮窗重开 App 又出现」。
+    private static final String MIRROR_PREFS = "mapclean_float_mirror";
+    private static final String MIRROR_KEY = "float_enabled";
+
+    private static android.content.SharedPreferences mirror() {
+        try {
+            android.content.Context c = io.github.ldxm666.mapclean.App.ctx();
+            if (c == null) return null;
+            return c.getSharedPreferences(MIRROR_PREFS, android.content.Context.MODE_PRIVATE);
         } catch (Throwable t) {
-            return floatDefault();
+            return null;
         }
+    }
+
+    private static Boolean mirrorGet() {
+        try {
+            android.content.SharedPreferences p = mirror();
+            if (p == null || !p.contains(MIRROR_KEY)) return null;
+            return Boolean.valueOf(p.getBoolean(MIRROR_KEY, true));
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static void mirrorPut(boolean value) {
+        try {
+            android.content.SharedPreferences p = mirror();
+            if (p != null) p.edit().putBoolean(MIRROR_KEY, value).apply();
+        } catch (Throwable ignored) { }
     }
 
     /**
@@ -380,6 +421,9 @@ public final class FloatingConfig {
         // Applied only when the write landed: the vendor panels' own readers cache the same
         // snapshot, so acting on a failed write would make the UI and the hook disagree.
         if (ok && K_FLOAT_ENABLED.equals(key)) {
+            // 记住用户的显式选择：下次进程启动时远程通道可能还没就绪，靠它兜底，
+            // 否则「关掉的悬浮窗重开 App 又出现」（float_enabled 读不到就回落到默认 true）。
+            mirrorPut(value);
             try {
                 FloatingController.setEnabled(value);
             } catch (Throwable t) {

@@ -96,14 +96,12 @@ final class SwitchFinder {
         bar = new LinearLayout(c);
         bar.setOrientation(LinearLayout.HORIZONTAL);
         bar.setGravity(Gravity.CENTER_VERTICAL);
-        bar.setBackground(UiKit.plate(dark ? 0x1AFFFFFF : 0x0F000000, UiKit.dpf(c, 14f)));
+        bar.setBackground(UiKit.outlined(dark ? 0xFF1D222A : 0xFFF0F2F5,
+                dark ? 0xFF262B33 : 0xFFE7E9EE, Math.max(1, UiKit.dp(c, 1)), UiKit.dpf(c, 12f)));
         bar.setPadding(UiKit.dp(c, 12), 0, UiKit.dp(c, 8), 0);
 
-        TextView glyph = new TextView(c);
-        glyph.setText("⌕");
-        glyph.setTextSize(16f);
-        glyph.setTextColor(cTxS());
-        bar.addView(glyph);
+        Icon glyph = new Icon(c, Icon.SEARCH, cTxS());
+        bar.addView(glyph, new LinearLayout.LayoutParams(UiKit.dp(c, 18), UiKit.dp(c, 18)));
 
         field = new EditText(c);
         field.setHint("搜索开关 / 工具名 / 配置键");
@@ -158,10 +156,10 @@ final class SwitchFinder {
     }
 
     // ── 配色（与 MainActivity 同一套 Liquid Glass 色板，避免为了一条搜索框再建一个 palette）──
-    private int cTxP()   { return dark ? 0xFFF2F4F8 : 0xFF171B23; }
-    private int cTxS()   { return dark ? 0xFF98A0AC : 0xFF7A8290; }
-    private int cAccent(){ return dark ? 0xFF7AB1FF : 0xFF0A6CF5; }
-    private int cRipple(){ return dark ? 0x267AB1FF : 0x140A6CF5; }
+    private int cTxP()   { return dark ? 0xFFF3F5F8 : 0xFF14171C; }
+    private int cTxS()   { return dark ? 0xFFA3ACBA : 0xFF5B6472; }
+    private int cAccent(){ return dark ? 0xFF6FA0FF : 0xFF2563EB; }
+    private int cRipple(){ return dark ? 0x22FFFFFF : 0x0F000000; }
 
     /** 注册一页；page 下标必须与 pager 子视图顺序一致。 */
     void register(int page, Target target) {
@@ -263,7 +261,7 @@ final class SwitchFinder {
         }
     }
 
-    private static final String[] PAGE_LABEL = {"百度", "高德", "腾讯", "其他"};
+    private static final String[] PAGE_LABEL = {"百度", "高德", "腾讯"};
 
     private View chip(String label, final int page) {
         TextView c = new TextView(context);

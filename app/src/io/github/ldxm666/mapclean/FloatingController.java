@@ -129,6 +129,24 @@ public final class FloatingController {
      * <p>Read lazily rather than at class-init: the controller is first touched from
      * {@code Application.onCreate}, which can be before the module's preferences are reachable.
      */
+    /**
+     * 服务绑定后重新判定一次总开关。
+     *
+     * <p>为什么需要：{@link #isEnabled()} 会缓存第一次读到的值，而那次读发生在进程刚起来、
+     * 框架服务还没绑定的时候 —— 那时读不到 {@code float_enabled}，只能回落到默认值（内置版 = 开）。
+     * 结果就是「用户明明关掉了悬浮窗，重开 App 又出现」。服务一绑定，这里把缓存丢掉重判一次。
+     */
+    public static void refreshEnabled() {
+        try {
+            enabled = null;
+            boolean v = isEnabled();
+            Log.i(TAG, "event=float_enabled_refreshed value=" + v);
+            if (v) reattach(); else detachAll();
+        } catch (Throwable t) {
+            Log.w(TAG, "refreshEnabled failed: " + t.getClass().getSimpleName());
+        }
+    }
+
     public static boolean isEnabled() {
         Boolean current = enabled;
         if (current == null) {
@@ -180,6 +198,9 @@ public final class FloatingController {
         }
         if (snapshot.length > 0) Log.i(TAG, "floating layers removed: " + snapshot.length);
     }
+
+    /** Public recovery entry: re-attach the orb to every remembered window. */
+    public static void reattachAll() { reattach(); }
 
     /** Re-attach to every Activity we know about; safe from any thread. */
     private static void reattach() {

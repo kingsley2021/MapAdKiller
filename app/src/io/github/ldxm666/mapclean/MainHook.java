@@ -122,6 +122,16 @@ public final class MainHook extends XposedModule {
             io.github.ldxm666.mapclean.FloatingHooks.install(this, pkg, true);
         }
 
+        // 百度内置版：长按底部「我的」那一格 ≈750ms 弹出面板 —— 这是「关掉悬浮球之后」
+        // 唯一的找回入口（百度内置版没有 MainActivity、也没有 tab 入口）。
+        // 内部自带三道门控：模块模式跳过 / 非百度进程跳过 / 锚点缺失跳过，任何一道不满足都
+        // 一条 hook 都不装，所以这里可以无条件调用。
+        try {
+            BaiduMineEntry.install(this, pkg, param.getClassLoader());
+        } catch (Throwable t) {
+            Log.w(TAG, "baidu mine entry install failed", t);
+        }
+
         // 高德 / 百度 / 腾讯：去广告基线（含 SDK 自动检索）。
         // 本变体（免 root 内置版）只并入高德，但仍保留 mapadkiller 自己的基线分发，
         // 它内部已经按包名分别处理三家，不会重复安装。

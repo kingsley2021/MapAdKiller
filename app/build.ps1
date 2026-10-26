@@ -41,7 +41,7 @@ if (-not (Test-Path "$src\AndroidManifest.xml")) { throw "copy failed" }
 $verText = [System.IO.File]::ReadAllText("$src\src\io\github\ldxm666\mapclean\Version.java")
 if ($verText -notmatch 'NAME\s*=\s*"([^"]+)"') { throw "cannot parse Version.NAME from Version.java" }
 $VerName = $Matches[1]
-if ($VerName -notmatch '^\d+\.\d+\.\d+$') { throw "unexpected Version.NAME: $VerName" }
+if ($VerName -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9.]+)?$') { throw "unexpected Version.NAME: $VerName" }
 $LspName = "MapClean-lsp-v$VerName.apk"
 Write-Host "module version = $VerName  ->  output $LspName"
 

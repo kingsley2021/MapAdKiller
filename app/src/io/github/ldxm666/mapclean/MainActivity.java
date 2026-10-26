@@ -221,6 +221,9 @@ public final class MainActivity extends Activity {
         shell.post(new Runnable() {
             @Override public void run() { UiKit.enter(contentHost, skin.dp(8), 0L); }
         });
+
+        // 首次进入的强制提示（3 秒后才能点掉）。异常全吞：设置页崩了比少弹一次严重得多。
+        // 用户要求：去掉每次打开模块的提示弹窗（FirstRunNotice.maybeShow 调用已移除）
     }
 
     // ── 状态心跳 ────────────────────────────────────────────────────────────
@@ -550,7 +553,7 @@ public final class MainActivity extends Activity {
         LinearLayout.LayoutParams rlp2 = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         rlp2.topMargin = dp(10);
-        r2.addView(dlgButton("Telegram 群", false, new Runnable() {
+        r2.addView(dlgButton("TG 通知频道", false, new Runnable() {
             @Override public void run() { openUrl(Version.TG); dlg.dismiss(); }
         }), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
         r2.addView(spacer(dp(10)));
@@ -837,6 +840,10 @@ public final class MainActivity extends Activity {
     private static final class Sec {
         LinearLayout group;
         LinearLayout card;
+        /** 卡片内的头行（标题 + 下拉箭头）。搜索态会藏起来，改用卡片外的纯文字标题。 */
+        View head;
+        /** 搜索态专用：卡片外的纯文字分组标题（无背景、无卡片）。 */
+        TextView label;
         View chev;
         boolean expanded;
     }
@@ -847,9 +854,12 @@ public final class MainActivity extends Activity {
         s.expanded = false;
         s.group = new LinearLayout(this);
         s.group.setOrientation(LinearLayout.VERTICAL);
-        s.group.setBackground(skin.glassFor(s.group, 18));
+        // 纯色底 + 1 px 描边，零 elevation。
+        // 这里刻意不用 GlassDrawable：它的「1 dp 深色外圈 + 0.8 dp 白色内圈」双层 rim
+        // 在白底上会被看成一条浮在卡片外面的灰色阴影带（外圈 224 被两侧 255/253 夹住），
+        // 再叠一层 skin.shadow() 就是用户报的「怪状阴影」。
+        s.group.setBackground(skin.glass(18));
         UiKit.clipRounded(s.group, dp(18));
-        skin.shadow(s.group, 3f);
 
         LinearLayout head = new LinearLayout(this);
         head.setOrientation(LinearLayout.HORIZONTAL);
@@ -868,12 +878,22 @@ public final class MainActivity extends Activity {
         head.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) { toggle(s); }
         });
+        s.head = head;
         s.group.addView(head, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
+        // 搜索态的分组标题：卡片外的纯文字，与抽屉头行互斥显示（平时 GONE）。
+        s.label = skin.section(title);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        llp.topMargin = dp(14);
+        llp.leftMargin = dp(4);
+        s.label.setVisibility(View.GONE);
+        list.addView(s.label, llp);
+
         s.card = new LinearLayout(this);
         s.card.setOrientation(LinearLayout.VERTICAL);
-        s.card.setPadding(dp(6), 0, dp(6), dp(10));
+        s.card.setPadding(dp(6), dp(4), dp(6), dp(10));
         s.card.setVisibility(View.GONE);
         s.group.addView(s.card, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -997,7 +1017,9 @@ public final class MainActivity extends Activity {
         sec = newDrawer("高德 · 首页工具宫格");
         addNoteRow(sec.card, "按固定工具 ID 控制显示。关闭全部首页推荐时采用原生工具数据构建等宽宫格，自动补位；图标与点击动作同步保留。");
         addSwitch(sec.card, "显示首页工具宫格", Config.K_TOOLS_VISIBLE);
+        addSwitch(sec.card, "自动进入巡航（模块接管）", Config.K_CRUISE_AUTO);
         addSwitch(sec.card, "反转开关：仅显示已打开的工具", Config.K_TOOLS_ALLOWLIST);
+        addSwitch(sec.card, "工具图标统一彩绘（实验）", Config.K_TOOL_COLOR_ICON);
         addNoteRow(sec.card, "开启反转后，只保留你明确打开的工具；未设置、新增和未知工具全部隐藏。关闭反转可恢复原有默认值。修改后重开高德生效。");
         addNoteRow(sec.card, "以下目录取自高德「更多工具」，按出行、服务等分类。开启的工具会补入首页；新增推广工具默认关闭。同名工具按 ID 分别控制。");
         addSwitch(sec.card, "显示「更多工具」", Config.K_TOOL_PREFIX + "更多工具");
@@ -1013,6 +1035,17 @@ public final class MainActivity extends Activity {
             }
         }
 
+        // 搜索页金刚位（搜索框下方那一排彩色入口）。
+        // ⚠ 这个开关原先只注册在 AmapPanel，而 AmapPanel 只被 FloatingPanel 使用 ——
+        //   悬浮窗**只在免 root 内置版存在**，模块模式（LSPosed）根本没有悬浮窗。
+        //   ⇒ 模块用户点不到它。所以必须在模块 App 的配置页也注册一份。
+        sec = newDrawer("高德 · 搜索页");
+        addSwitch(sec.card, "显示搜索页快捷金刚位（实验，关闭会留白）", Config.K_SEARCH_GRID);
+        addNoteRow(sec.card, "搜索框下方那一排彩色入口（美食 / 酒店 / 景点门票 / 加油充电 / 超划算 / 扫街榜 等，随版本变化）。"
+                + "该排由高德 AJX 页面在运行时绘制，服务端数据、本地缓存、页面预载包三处都试过剔除，"
+                + "但页面总会回落到内置默认项（等于换另一批广告），故只能在显示层隐藏。"
+                + "代价：进入搜索页会先闪现约 0.3 秒再消失、每次进入重演一次、原位留一条空白。如实告知。");
+
         sec = newDrawer("高德 · 首页推荐内容");
         addSwitch(sec.card, "扫街榜 / 周边精选榜单（首页及分页）", Config.K_FEED_BOARD);
         addSwitch(sec.card, "首页出行节 / 促销活动接口", Config.K_FEED_FESTIVAL);
@@ -1025,9 +1058,6 @@ public final class MainActivity extends Activity {
         addNoteRow(sec.card, "首页那支搜索框里的文字会自己流动（预置词/运营词，有时是广告）。"
                 + "打开本开关后文字被钉死成系统默认提示词「查找地点、公交、地铁」，"
                 + "热词品牌图标一并摘掉；关掉开关即可恢复原样。");
-        addSwitch(sec.card, "关闭首页「去XXX 打车」打车浮窗（打车运营卡）",
-                Config.K_RIDE_CARD_OFF);
-        addNoteRow(sec.card, "拦截首页 taxiQS 和 taxiQSMarket 数据卡。关闭全部推荐、天气和常去地点时，首页不创建推荐画布，避免刷新回弹及留白。修改后重开高德生效。");
         addNoteRow(sec.card, "适配高德 17.00.0.2005。旧版按文字区分的景区帖、距离帖等开关已合并为榜单和内容流。尚无精确入口的频道栏、快捷入口排不再提供开关。");
 
         sec = newDrawer("高德 · 地点详情");
@@ -1124,7 +1154,7 @@ public final class MainActivity extends Activity {
                     if (row.key == null) addNoteRow(sec.card, row.title);
                     else addBmapSwitch(sec.card, row.title, row.key, row.note);
                 }
-                if (i == 0) toggle(sec);        // 第一组默认展开
+                // 全部默认收起：与高德页统一（v2.2.5，用户要求「不要固定展开」）
             }
             // ── 百度 · 省电 / 后台（v2.2.3 新增）──────────────────────────────
             // 与高德那组对齐：键都是「true = 该行为已被拦截」，所以 label 一律写「关闭…」。
@@ -1231,6 +1261,8 @@ public final class MainActivity extends Activity {
                         Sec s = secs.get(i);
                         if (s == null || s.card == null) continue;
                         s.group.setVisibility(View.VISIBLE);
+                        if (s.head != null) s.head.setVisibility(View.VISIBLE);
+                        if (s.label != null) s.label.setVisibility(View.GONE);
                         filterRows(s.card, "");
                     }
                 } finally {
@@ -1264,7 +1296,7 @@ public final class MainActivity extends Activity {
                     if (row.key == null) addNoteRow(sec.card, row.title);
                     else addTmapSwitch(sec.card, row.title, row.key, row.note);
                 }
-                if (i == 0) toggle(sec);        // 第一组默认展开
+                // 全部默认收起：与高德页统一（v2.2.5，用户要求「不要固定展开」）
             }
         } finally {
             list = old;
@@ -1428,30 +1460,56 @@ public final class MainActivity extends Activity {
             // 抽屉一个命中都没有时整组收起，避免留一堆空壳标题。
             if (shown == 0) {
                 s.group.setVisibility(View.GONE);
+                if (s.label != null) s.label.setVisibility(View.GONE);
             } else {
                 s.group.setVisibility(View.VISIBLE);
+                // 搜索态：分组标题走卡片外的纯文字 section header，卡内不再重复一条头行。
+                if (s.head != null) s.head.setVisibility(View.GONE);
+                if (s.label != null) s.label.setVisibility(View.VISIBLE);
                 any = true;
             }
         }
         return any;
     }
 
-    /** @return 该卡片里被显示出来的开关行数 */
+    /**
+     * @return 该卡片里被显示出来的开关行数
+     *
+     * <p>分割线必须跟着行一起藏。旧实现只藏行、不藏线：一个 20 行的工具抽屉搜出 2 行，
+     * 中间就留下十几条 1 px 的 {@code divider} 叠成一条 40+ px 的灰色色带 —— 这正是用户
+     * 反馈的「行与行之间有诡异的阴影/色带」。
+     */
     private int filterRows(android.view.ViewGroup host, String query) {
+        final int n = host.getChildCount();
+        final boolean searching = query.length() > 0;
+        final boolean[] vis = new boolean[n];
         int shown = 0;
-        for (int i = 0; i < host.getChildCount(); i++) {
+
+        // 1) 开关行按 haystack 命中显隐；说明行 / 按钮没有 haystack，搜索态一并收起。
+        for (int i = 0; i < n; i++) {
             View child = host.getChildAt(i);
-            if (!(child instanceof android.view.ViewGroup)) continue;
-            android.view.ViewGroup row = (android.view.ViewGroup) child;
-            Object tag = row.getTag(TAG_HAYSTACK);
-            if (!(tag instanceof String)) {
-                // 说明行（左侧细色条那一种）不带开关，跟着同组显隐就行，别动它。
-                continue;
+            Object tag = child instanceof android.view.ViewGroup
+                    ? ((android.view.ViewGroup) child).getTag(TAG_HAYSTACK) : null;
+            if (tag instanceof String) {
+                boolean hit = !searching
+                        || ((String) tag).toLowerCase(java.util.Locale.ROOT).contains(query);
+                child.setVisibility(hit ? View.VISIBLE : View.GONE);
+                vis[i] = hit;
+                if (hit) shown++;
+            } else {
+                child.setVisibility(searching ? View.GONE : View.VISIBLE);
+                vis[i] = !searching;
             }
-            String haystack = ((String) tag).toLowerCase(java.util.Locale.ROOT);
-            boolean hit = query.length() == 0 || haystack.contains(query);
-            row.setVisibility(hit ? View.VISIBLE : View.GONE);
-            if (hit) shown++;
+        }
+
+        // 2) 1 px 分割线只在「前后两行都可见」时出现。
+        if (searching) {
+            for (int i = 1; i < n - 1; i++) {
+                View child = host.getChildAt(i);
+                if (child instanceof android.view.ViewGroup) continue;
+                if (child instanceof TextView) continue;
+                if (vis[i - 1] && vis[i + 1]) child.setVisibility(View.VISIBLE);
+            }
         }
         return shown;
     }
@@ -2266,15 +2324,18 @@ public final class MainActivity extends Activity {
     /** 联系作者：Telegram 群组 + GitHub Issues */
     private void showContact() {
         glassDialog("联系作者",
-                "Telegram 群组：反馈 / 交流 / 第一时间更新\n"
+                "TG 通知频道：发版公告 / 重要通知\n"
+                + "TG 聊天群：反馈 / 交流 / 提问\n"
                 + "GitHub Issues：bug 报告 / 功能需求",
-                "Telegram 群", new Runnable() {
-                    @Override public void run() { openUrl("https://t.me/+2rqisPe5tJxjNTk1"); }
+                "TG 通知频道", new Runnable() {
+                    @Override public void run() { openUrl(Version.TG); }
+                },
+                "TG 聊天群", new Runnable() {
+                    @Override public void run() { openUrl(Version.TG_CHAT); }
                 },
                 "GitHub Issues", new Runnable() {
                     @Override public void run() { openUrl("https://github.com/ldxm666/MapAdKiller/issues"); }
-                },
-                "取消", null);
+                });
     }
 
     private void openUrl(String url) {
@@ -2689,6 +2750,12 @@ public final class MainActivity extends Activity {
         skin.addSection(root, "作者");
         root.addView(buildAuthorCard(), skin.matchWrap());
 
+        // 赞赏：主页最后一个区块，点开收款码
+        skin.addSection(root, "赞赏");
+        LinearLayout donate = skin.listCard();
+        donate.addView(donateRow());
+        root.addView(donate, skin.matchWrap());
+
         TextView foot = skin.footnote("免费开源 · 禁止倒卖 · MapAdKiller v" + Version.LABEL);
         foot.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams flp = skin.matchWrap();
@@ -2736,11 +2803,14 @@ public final class MainActivity extends Activity {
     }
 
     private LinearLayout appRow(final String pkg, final String label, final int vendor) {
+        String version = installedVersion(pkg);
+        // 未安装：收成一行紧凑条目，且不画灰底单字图标（v2.2.5）
+        if (version == null) return appRowUninstalled(pkg, label, vendor);
+
         LinearLayout row = skin.row();
         row.addView(appIcon(pkg, label), fixedMargin(skin, 42, 42, 12));
 
         int count = vendor == 0 ? bmapSwitches.size() : vendor == 1 ? switches.size() : tmapSwitches.size();
-        String version = installedVersion(pkg);
         String recommended = recommendedVersion(pkg);
         String caption = "推荐 " + (recommended == null ? "—" : recommended);
         if (version == null) caption += embedded() ? " · 未安装" : " · 本机未安装";
@@ -2750,6 +2820,60 @@ public final class MainActivity extends Activity {
 
         Icon chev = new Icon(this, Icon.CHEVRON, skin.text3);
         row.addView(chev, fixed(skin, 18, 18));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                showTab(TAB_CONFIG, true);
+                selectApp(vendor);
+            }
+        });
+        UiKit.pressable(row, 0.99f);
+        return row;
+    }
+
+    /**
+     * 未安装的地图：一行紧凑条目（44dp），不占 42dp 图标位、不画灰底单字。
+     * 仍然可点 —— 进对应功能页能看到有哪些开关、推荐哪个版本，只是不再占一整坨。
+     */
+    private LinearLayout appRowUninstalled(final String pkg, final String label, final int vendor) {
+        LinearLayout row = skin.row();
+        row.setMinimumHeight(skin.dp(44));
+
+        // 图标常态化：不再用 20dp 下载箭头（像「待下载的文件」），改成品牌色圆角方形 App 图标，
+        // 与已安装项的 42dp 图标同一视觉语言。装了对应 App 会自动换成它自己的真图标。
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(skin.dp(32), skin.dp(32));
+        ilp.rightMargin = skin.dp(12);
+        // 优先用**该 App 的原生启动图标**（从它的 APK 里提出来内嵌的）；取不到才退回品牌色圆角图标。
+        android.graphics.drawable.Drawable real =
+                "com.tencent.map".equals(pkg) ? TencentIconAsset.drawable(this) : null;
+        if (real != null) {
+            android.widget.ImageView iv = new android.widget.ImageView(this);
+            iv.setImageDrawable(real);
+            iv.setScaleType(android.widget.ImageView.ScaleType.FIT_CENTER);
+            row.addView(iv, ilp);
+        } else {
+            row.addView(new AppIcon(this, vendor), ilp);
+        }
+
+        // 名称正常色 +「未安装」红色。两个 TextView 比 SpannableString 更简单，也不会多引类。
+        LinearLayout nameWrap = new LinearLayout(this);
+        nameWrap.setOrientation(LinearLayout.HORIZONTAL);
+        nameWrap.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        nameWrap.addView(skin.text(label, Skin.T_ROW, Skin.MEDIUM, skin.text2));
+        nameWrap.addView(skin.text(embedded() ? " · 未安装" : " · 本机未安装",
+                Skin.T_ROW, Skin.MEDIUM, 0xFFE53935));
+        row.addView(nameWrap, new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        String recommended = recommendedVersion(pkg);
+        if (recommended != null && recommended.length() > 0) {
+            TextView chip = skin.chip("推荐 " + recommended, skin.chipBg, skin.text3);
+            LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            clp.rightMargin = skin.dp(8);
+            row.addView(chip, clp);
+        }
+        row.addView(new Icon(this, Icon.CHEVRON, skin.text3), fixed(skin, 18, 18));
+
         row.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 showTab(TAB_CONFIG, true);
@@ -2773,7 +2897,7 @@ public final class MainActivity extends Activity {
         return null;
     }
 
-    /** 装了的应用用真实图标，没装用首字色块，避免一行出现两个空白方块。 */
+    /** 装了的应用用真实图标；取不到图标时用 accent 字标兜底（不再用灰底灰字）。未安装的行不走这里。 */
     private View appIcon(String pkg, String label) {
         FrameLayout box = new FrameLayout(this);
         Drawable icon = null;
@@ -2785,9 +2909,10 @@ public final class MainActivity extends Activity {
             box.addView(image, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         } else {
-            TextView letter = skin.text(label.substring(0, 1), 16f, Skin.MEDIUM, skin.text2);
+            // 字标兜底：accent 底 + 白字，看起来像有意设计，而不是灰底灰字的半成品
+            TextView letter = skin.text(label.substring(0, 1), 16f, Skin.BOLD, skin.onAccent);
             letter.setGravity(Gravity.CENTER);
-            box.setBackground(skin.solid(skin.chipBg, 11));
+            box.setBackground(skin.solid(skin.accent, 11));
             box.addView(letter, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
@@ -2868,6 +2993,32 @@ public final class MainActivity extends Activity {
         return lp;
     }
 
+    /* ──────────────────────────────────────────────────────────── 赞赏 */
+
+    /** 「赞赏支持」行：骨架照抄 linkRow，只是点开的是收款码对话框而不是外链。 */
+    private View donateRow() {
+        LinearLayout row = skin.row();
+        LinearLayout badge = new LinearLayout(this);
+        badge.setOrientation(LinearLayout.HORIZONTAL);
+        badge.setGravity(Gravity.CENTER);
+        badge.setBackground(skin.solid(skin.chipBg, 10));
+        badge.addView(new Icon(this, Icon.SEND, skin.accent), fixed(skin, 18, 18));
+        row.addView(badge, fixedMargin(skin, 38, 38, 12));
+        row.addView(skin.rowText("赞赏支持", "感谢投喂 · 扫码请作者喝杯咖啡"),
+                new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        row.addView(new Icon(this, Icon.CHEVRON, skin.text3), fixed(skin, 16, 16));
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showDonateDialog(); }
+        });
+        return row;
+    }
+
+    /** 收款码来自 DonateAsset（base64 内嵌，无 R 类）；解码失败退化成一行文字，不崩。 */
+    private void showDonateDialog() {
+        // 统一到 DonateUi，模块版与内置版同一套观感
+        DonateUi.show(this);
+    }
+
     /* ──────────────────────────────────────────────────────────── 配置页 */
 
     private View buildConfigPage() {
@@ -2917,7 +3068,21 @@ public final class MainActivity extends Activity {
         searchLp.leftMargin = skin.dp(Skin.S5);
         searchLp.rightMargin = skin.dp(Skin.S5);
         screen.addView(searchBar, searchLp);
-        screen.addView(finder.resultsHost(), skin.matchWrap());
+        View resultsHost = finder.resultsHost();
+        try {
+            if (resultsHost instanceof android.widget.HorizontalScrollView) {
+                android.widget.HorizontalScrollView hs = (android.widget.HorizontalScrollView) resultsHost;
+                hs.setClipToPadding(false);
+                hs.setPadding(skin.dp(Skin.S5), skin.dp(Skin.S2), skin.dp(Skin.S5), 0);
+                // 结果统计胶囊：SwitchFinder 里 results 是 VERTICAL 的，塞进横向滚动容器后
+                // 会一个个竖着排（截图里「百度 · 2」「高德 · 2」各占一行）。这里掰回横排。
+                if (hs.getChildCount() > 0 && hs.getChildAt(0) instanceof LinearLayout) {
+                    ((LinearLayout) hs.getChildAt(0)).setOrientation(LinearLayout.HORIZONTAL);
+                }
+            }
+        } catch (Throwable ignored) { }
+        screen.addView(resultsHost, skin.matchWrap());
+
 
         configHost = new FrameLayout(this);
         LinearLayout.LayoutParams hostLp = new LinearLayout.LayoutParams(

@@ -1,12 +1,12 @@
 # MapAdKiller
 
-高德／百度地图广告精简与界面定制模块，基于 **libxposed API 102**。当前正式版 **2.1.2（版本码 212）**。
+高德／百度地图广告精简与界面定制模块，基于 **libxposed API 102**。当前正式版 **2.2.6（版本码 2260）**。
 
-[![正式版](https://img.shields.io/badge/version-2.1.2-blue)](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller/releases/tag/212-2.1.2) ![框架接口](https://img.shields.io/badge/libxposed-API_102-green) [![许可证](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
+[![正式版](https://img.shields.io/badge/version-2.2.6-blue)](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller/releases/tag/2260-2.2.6) ![框架接口](https://img.shields.io/badge/libxposed-API_102-green) [![许可证](https://img.shields.io/badge/license-GPL--3.0-orange)](LICENSE)
 
 目录：[版本变化](#相比-210-的主要变化) · [功能范围](#功能范围) · [安装与设置](#安装与范围) · [配置迁移](#配置与升级) · [问题反馈](#常见问题与反馈)
 
-[下载模块](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller/releases/tag/212-2.1.2) · [源码及完整交付](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.1.2) · [详细更新公告](https://github.com/ldxm666/MapAdKiller/blob/master/docs/RELEASE-2.1.2.md) · [更新日志](CHANGELOG.md)
+[下载模块](https://github.com/Xposed-Modules-Repo/io.github.ldxm666.mapadkiller/releases/tag/2260-2.2.6) · [源码及完整交付](https://github.com/ldxm666/MapAdKiller/releases/tag/v2.2.6) · [详细更新公告](https://github.com/ldxm666/MapAdKiller/blob/master/releases/tag/v2.2.6) · [更新日志](CHANGELOG.md)
 
 ## 相比 2.1.0 的主要变化
 

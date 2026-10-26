@@ -59,6 +59,17 @@ public final class MainHook {
 
         if (!PKG_AMAP.equals(pkg) && !PKG_BMAP.equals(pkg) && !PKG_TMAP.equals(pkg)) return;
 
+        // ── 官方基线抓取闸门（v2.2.5）────────────────────────────────────────────
+        // 首次安装/升级后的第一次启动：本进程一个 hook 都不装（等价于模块没装），
+        // 让高德跑纯官方；后台线程等首页稳定后把官方 shared_prefs 原样复制到
+        // <宿主 filesDir>/baseline/<模块版本>/。决策是同步的（只读标记），拷贝全在
+        // 后台线程，绝不阻塞宿主启动；任何失败都只写标记，不影响宿主。
+        // 放在进程分支之前 ⇒ 主进程和所有子进程一起透传（AmapSubprocess 也不装）。
+        if (PKG_AMAP.equals(pkg) && Baseline.maybeCapture()) {
+            H.log(Log.INFO, TAG, "event=baseline_passthrough process=" + process);
+            return;
+        }
+
         // ── 进程策略（17.02 / 2.3.0）──────────────────────────────────────────────
         // 主进程：全量（广告 UI 全在主进程）。
         // 高德的两个常驻子进程：只挂 **最小 kill 集**（AmapSubprocess），绝不挂 UI/数据层逻辑。

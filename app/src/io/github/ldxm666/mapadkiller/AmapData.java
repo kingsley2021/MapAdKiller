@@ -37,12 +37,30 @@ public final class AmapData {
      * {@code id0…id4} (its loop bound is 5) and lays the kept cells out in one row. Writing
      * more slots than this is harmless but invisible, so the payload is written for exactly
      * this many cells.
+     *
+     * <p><b>必须是 10（2 行 × 5 列），不能是 11。</b>宿主 {@code ToolboxPanelV2} 的宫格容器
+     * 固定只排两行；写第 11 个槽位会被挤成第三行，直接压到下面的「回家 / 去单位」行上
+     * —— 这就是用户报的「工具宫格有点重叠」。第 11 个及以后的工具仍然可以在「更多工具」里找到。
      */
-    public static final int HOME_SLOTS = 5;
+    public static final int HOME_SLOTS = 10;
+
+    /** 15.21 专用分支开关（由 AmapMine1521.install 置位；17.02 永远 false）。 */
+    public static volatile boolean IS_1521 = false;
 
     /** The app's fixed 「更多工具」 entry; it lives in the slot list like any other tool. */
     public static final String MORE_TOOLS = "86";
 
+    /**
+     * 官方 {@code local_tool_list_for_xml_v2} 的真实字段集 —— 从设备 toolbox.xml 逐字段核出来的，
+     * 一个不多一个不少（15 个）。**没有 weight**：宿主的工具行固定切 5 列，一旦槽位被带上
+     * weight，LinearLayout 会按权重重新分配宽度，多个 cell 就挤在一起、视觉上重叠。
+     * 所以写槽位时只允许写这 15 个字段。
+     */
+    private static final String[] OFFICIAL_FIELDS = {
+        "id", "schema", "name", "size", "containerClass", "isLottie", "displayLottie",
+        "displayImage", "imageUrlRender", "lottieUrlRender", "imageClass", "itemDataForClick",
+        "display", "imageToken", "moreItem"
+    };
     private static final String[] SLOT_FIELDS = {
         "id", "schema", "name", "size", "containerClass", "isLottie", "displayLottie",
         "displayImage", "imageUrlRender", "lottieUrlRender", "imageClass", "itemDataForClick",
@@ -57,11 +75,144 @@ public final class AmapData {
         return visible;
     }
 
+    /**
+     * 搜索页金刚位（美食 / 酒店 / 景点门票 / 加油充电 / 超划算 / 扫街榜 那一排）的 tool id。
+     *
+     * <p>真机实测（2026-10-25 23:57）：搜索页那排 **就是 toolbox payload 被 AJX 页渲染**，
+     * 走的正是本类的 {@code toolVisible}；把 {@code ui_tools_visible} 关掉后那排整块消失
+     * （截图 y370~554 高饱和像素 0.000 实证）。所以「整排开关」在这里收口最干净：
+     * 由 {@link Config#searchGrid()} 控制，**默认 true = 完全维持原有行为**。
+     *
+     * <p>按 id 判定，不按文案（文案是服务端下发的，随时会变）。
+     * 新出现的运营工具如果漏网，看日志 {@code event=amap_tool_visible} 补 id 即可。
+     */
+    private static final java.util.Set<String> SEARCH_GRID_IDS =
+            new java.util.HashSet<String>(java.util.Arrays.asList(
+                    "323",   // 美食
+                    "490",   // 加油充电
+                    "501",   // 超市
+                    "544",   // 超划算
+                    "483",   // 高德扫街榜
+                    "484")); // 特价酒店
+
+    /**
+     * 搜索页时间窗：`AmapSearchGrid` 在搜索页 `load` 时打一个时间戳，
+     * 窗口内构建的 toolbox payload 会跳过 {@link #SEARCH_GRID_IDS}。
+     *
+     * <p>为什么用时间窗而不是 ThreadLocal：payload 构建可能在别的线程/更晚的时机发生，
+     * 线程标记会漏；时间窗只覆盖「刚打开搜索页的那几秒」，首页/更多工具页都不在那个窗口内
+     * ⇒ 默认行为（未开窗）逐字节不变。
+     */
+    private static volatile long searchPageUntil;
+
+    /** 由 AmapSearchGrid 在搜索页加载时调用。 */
+    public static void markSearchPage(long millis) {
+        searchPageUntil = android.os.SystemClock.uptimeMillis() + millis;
+    }
+
+    private static boolean inSearchPageWindow() {
+        return android.os.SystemClock.uptimeMillis() < searchPageUntil;
+    }
+
+    /** 搜索页金刚位：开关关掉 + 处于搜索页时间窗 ⇒ 从 payload 里跳过。 */
+    // ★ 已证伪（勿再启用）：曾假设「搜索页那排 = 首页 toolbox payload」，据此按 id 剔除。
+    //   5 轮实机否证：即使去掉时间窗，sat 仍恒为 0.341；且同一构建上关掉 ui_tools_visible
+    //   也丝毫不影响那排 ⇒ 它并不走这份 payload。留着恒 false，保持原有行为逐字节不变，
+    //   同时避免误伤「更多工具」页（那 6 个 id 确实在它的候选列表里）。
+    private static boolean skipSearchGrid(String id) {
+        return false;   // 原实现：id != null && SEARCH_GRID_IDS.contains(id) && !Config.searchGrid()
+    }
+
     private static boolean toolVisibleRaw(String id, Settings s) {
         if (!s.enabled(Config.K_TOOLS_VISIBLE)) return false;
         boolean allowlist = s.enabled(Config.K_TOOLS_ALLOWLIST);
         String key = AmapToolCatalog.key(id);
         return key != null && (allowlist ? s.selected(key) : s.enabled(key));
+    }
+
+    /**
+     * 「宿主自有列表」的保留判定 —— 用于 {@code local_tool_list_for_xml_v2} 存储读取与
+     * {@code toolbox.a.a(...)} 的 source payload。
+     *
+     * <p>宿主列表里的槽位是**用户自己**在高德「更多工具」里选的，模块只能剔除「显式关掉 /
+     * 推广」的工具，不能因为模块面板里 {@code tool_id_<id>} 默认 false 就把它们砍掉。
+     * 真机事故：用户新加一个工具后，读回 {@code local_tool_list_for_xml_v2} 时被过滤 ⇒
+     * 首页宫格永远只有那 5 个（「我添加工具但是不会增加」的根因）。
+     *
+     * <p>规则：{@code K_TOOLS_VISIBLE} 关 ⇒ false；未知 id ⇒ true；{@code tool_id_*} ⇒
+     * true（用户在高德里选的）；其余 legacy 工具走 {@code s.enabled(key)}（保留
+     * {@link Config#TOOLS_DEFAULT_OFF} 那 7 条推广工具的默认剔除）。
+     */
+    public static boolean toolKeep(String id, Settings s) {
+        if (id == null || id.length() == 0) return false;
+        if (!s.enabled(Config.K_TOOLS_VISIBLE)) {
+            reportKeep(id, null, false, "switch_off");
+            return false;
+        }
+        String key = AmapToolCatalog.key(id);
+        if (key == null) {
+            reportKeep(id, null, true, "unknown");
+            return true;
+        }
+        if (key.startsWith("tool_id_")) {
+            // ★ 方案 C（透传优先）：宿主 payload 里给的工具有什么就显示什么，
+            //   只有用户在模块面板里**显式关掉**的才剔除。
+            //   之前用 s.selected(key) 要求「显式打开才保留」，导致配置里没有记录的工具
+            //   （包括宿主自己给的）全被剔掉，首页只剩「更多工具」一个格子。
+            Boolean explicit = Config.explicit(key);
+            boolean kept = explicit == null || explicit.booleanValue();
+            reportKeep(id, key, kept,
+                    kept ? (explicit == null ? "pass_through" : "user_selected") : "switch_off");
+            return kept;
+        }
+        boolean kept = s.enabled(key);
+        String label = key.substring(Config.K_TOOL_PREFIX.length());
+        reportKeep(id, key, kept, kept ? "user_selected"
+                : (Config.TOOLS_DEFAULT_OFF.contains(label) ? "promo" : "switch_off"));
+        return kept;
+    }
+
+    /**
+     * 「模块补位」判定 —— 只用于 {@code fill}：只有用户在模块面板里**显式打开**的工具
+     * 才会被补进空位，避免 {@code tool_id_*} 那 ~95 条目录工具全部塞进首页。
+     */
+    public static boolean toolFill(String id, Settings s) {
+        if (id == null || id.length() == 0) return false;
+        if (!s.enabled(Config.K_TOOLS_VISIBLE)) return false;
+        String key = AmapToolCatalog.key(id);
+        if (key == null) return false;
+        boolean filled;
+        if (key.startsWith("tool_id_")) filled = s.selected(key);
+        else filled = s.enabled(key);
+        reportFill(id, key, filled, s.selected(key));
+        return filled;
+    }
+
+    /** toolFill 诊断：每个 id 只报一次，封顶 60 条。 */
+    private static final java.util.Set<String> FILL_REPORTED =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private static void reportFill(String id, String key, boolean filled, boolean selected) {
+        try {
+            if (FILL_REPORTED.size() >= TOOL_REPORT_MAX) return;
+            if (!FILL_REPORTED.add(id)) return;
+            H.log("event=amap_tool_fill id=" + id + " key=" + key + " filled=" + filled
+                    + " selected=" + selected);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** toolKeep 诊断：每个 id 只报一次，封顶 60 条。 */
+    private static final java.util.Set<String> KEEP_REPORTED =
+            java.util.Collections.synchronizedSet(new java.util.HashSet<String>());
+
+    private static void reportKeep(String id, String key, boolean kept, String why) {
+        try {
+            if (KEEP_REPORTED.size() >= TOOL_REPORT_MAX) return;
+            if (!KEEP_REPORTED.add(id)) return;
+            H.log("event=amap_tool_keep id=" + id + " key=" + key + " kept=" + kept + " why=" + why);
+        } catch (Throwable ignored) {
+        }
     }
 
     // ── 节流诊断（每个 id 只打一次，总数封顶）────────────────────────────────────
@@ -181,11 +332,23 @@ public final class AmapData {
      *             are never written into it.
      */
     public static JSONObject toolbox(JSONObject source, Settings s, boolean fill) throws Exception {
+        return toolbox(source, s, fill, HOME_SLOTS);
+    }
+
+    /**
+     * Same as {@link #toolbox(JSONObject, Settings, boolean)} with an explicit slot cap.
+     *
+     * <p>{@code maxSlots <= 0} means "keep the host's own slot count" -- required by 15.21,
+     * whose default payload carries 15 tools and whose panel pages through them; truncating
+     * to {@link #HOME_SLOTS} would silently drop tools the user enabled.
+     */
+    public static JSONObject toolbox(JSONObject source, Settings s, boolean fill, int maxSlots) throws Exception {
         List<Integer> kept = new ArrayList<Integer>();
+        int scanLimit = maxSlots <= 0 ? 32 : Math.max(10, maxSlots);
         int count = 0;
-        for (; count < 10 && source.has("id" + count); count++) {
+        for (; count < scanLimit && source.has("id" + count); count++) {
             String id = source.optString("id" + count);
-            if (id.length() > 0 && toolVisible(id, s)) kept.add(count);
+            if (id.length() > 0 && toolKeep(id, s) && !skipSearchGrid(id)) kept.add(count);
         }
 
         List<String[]> extra = new ArrayList<String[]>();
@@ -193,8 +356,8 @@ public final class AmapData {
             java.util.Set<String> present = new java.util.HashSet<String>();
             for (int index : kept) present.add(source.optString("id" + index));
             for (String[] entry : AmapToolCatalog.ENTRIES) {
-                if (kept.size() + extra.size() >= HOME_SLOTS) break;
-                if (present.contains(entry[0]) || !toolVisible(entry[0], s)) continue;
+                if (maxSlots > 0 && kept.size() + extra.size() >= maxSlots) break;
+                if (present.contains(entry[0]) || !toolFill(entry[0], s) || skipSearchGrid(entry[0])) continue;
                 extra.add(entry);
                 present.add(entry[0]);
             }
@@ -202,14 +365,23 @@ public final class AmapData {
         if (count == kept.size() && extra.isEmpty()) return source;
 
         JSONObject out = new JSONObject(source.toString());
-        int cells = Math.max(count, HOME_SLOTS);
+        int cells = fill ? (maxSlots <= 0 ? Math.max(count, kept.size() + extra.size())
+                : Math.max(count, maxSlots)) : Math.max(count, kept.size() + extra.size());
+        // 宿主自己的「空槽」是行距占位，**不能删键**。
+        // toolbox.a.a 的循环条件是 has("id"+i)：键一消失就提前结束，后面本该由空槽
+        // 撑出来的行距全部丢失，两行工具就被压在一起（用户看到的“重叠”）。
+        // 正确做法：拿宿主本来的空槽当模板，原样回填到剩余槽位。
+        JSONObject pad = emptySlotTemplate(source, count);
         for (int i = 0; i < cells; i++) {
             for (String field : SLOT_FIELDS) out.remove(field + i);
             if (i < kept.size()) copySlot(source, out, kept.get(i), i);
             else if (i - kept.size() < extra.size()) writeSlot(out, extra.get(i - kept.size()), i);
-            else blankSlot(out, i);
+            else if (pad != null) {
+                for (String field : SLOT_FIELDS) if (pad.has(field)) out.put(field + i, pad.opt(field));
+            } else blankSlot(out, i);
         }
         if (kept.isEmpty() && extra.isEmpty()) out.put("king_switch", "0");
+        moveMoreToolsLast(out);
         return out;
     }
 
@@ -222,6 +394,24 @@ public final class AmapData {
             out.append(id.length() == 0 ? "-" : id);
         }
         return out.toString();
+    }
+
+    /**
+     * 取宿主自己下发的一个「空槽」当行距占位模板。
+     *
+     * <p>实测（AMap 17.02.0.1541）：宿主 {@code local_tool_list_for_xml_v2} 线上 payload
+     * 是 {@code id0..id10} 共 11 个键，后 3 个是 {@code id=""} 的空槽。这些空槽撑出每行
+     * 的上下留白；一旦把键删掉，{@code toolbox.a.a} 的 {@code has("id"+i)} 立刻为假、
+     * 循环提前结束，行距消失 → 两行图标贴在一起。
+     */
+    private static JSONObject emptySlotTemplate(JSONObject source, int count) throws Exception {
+        for (int i = 0; i < count; i++) {
+            if (source.optString("id" + i).length() > 0) continue;
+            JSONObject pad = new JSONObject();
+            for (String field : SLOT_FIELDS) if (source.has(field + i)) pad.put(field, source.opt(field + i));
+            return pad.length() == 0 ? null : pad;
+        }
+        return null;
     }
 
     /** Move one of the app's own slots, action and icon included. */
@@ -247,6 +437,186 @@ public final class AmapData {
      * ({@code com.autonavi...toolbox.v3.f.a}: {@code Uri.decode} then {@code optString("schema")};
      * the optional {@code ut} block is only used for analytics and its absence is handled).
      */
+    /**
+     * Fill missing cells from the host's own tool catalogue (toolbox.xml:tool_list_data).
+     *
+     * <p>The static {@link AmapToolCatalog} was extracted from 17.00; a tool that exists there
+     * but not in the installed build's catalogue gets silently dropped by the renderer. Using
+     * the host's own item objects means every id, schema and icon is one the app already knows.
+     */
+    public static JSONObject toolbox(JSONObject source, Settings s, android.content.Context ctx) throws Exception {
+        JSONObject base = toolbox(source, s, false);
+        if (ctx == null) return toolbox(source, s, true);
+        java.util.Map<String, JSONObject> host = new java.util.HashMap<String, JSONObject>();
+        try {
+            String raw = ctx.getSharedPreferences("toolbox", android.content.Context.MODE_PRIVATE)
+                    .getString("tool_list_data", null);
+            if (raw != null) {
+                JSONArray cats = new JSONObject(raw).optJSONArray("category");
+                if (cats != null) for (int i = 0; i < cats.length(); i++) {
+                    JSONObject cat = cats.optJSONObject(i);
+                    JSONArray list = cat == null ? null : cat.optJSONArray("tools");
+                    if (list == null) continue;
+                    for (int j = 0; j < list.length(); j++) {
+                        JSONObject item = list.optJSONObject(j);
+                        if (item != null) host.put(item.optString("id"), item);
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        java.util.List<String> kept = new java.util.ArrayList<String>();
+        for (int i = 0; i < 16 && source.has("id" + i); i++) {
+            String id = source.optString("id" + i);
+            if (id.length() > 0 && toolKeep(id, s)) kept.add(id);
+        }
+        java.util.List<JSONObject> extra = new java.util.ArrayList<JSONObject>();
+        java.util.Set<String> present = new java.util.HashSet<String>(kept);
+        for (String[] entry : AmapToolCatalog.ENTRIES) {
+            if (kept.size() + extra.size() >= HOME_SLOTS) break;
+            if (present.contains(entry[0]) || !toolFill(entry[0], s)) continue;
+            JSONObject item = host.get(entry[0]);
+            if (item == null) continue;
+            mergeDefaultIcon(item, entry[0]);
+            extra.add(item); present.add(entry[0]);
+        }
+        JSONObject out = new JSONObject(base.toString());
+        int cells = Math.max(HOME_SLOTS, kept.size() + extra.size());
+        for (int i = 0; i < cells; i++) for (String field : SLOT_FIELDS) out.remove(field + i);
+        int slot = 0;
+        for (int i = 0; i < 16 && slot < kept.size(); i++) {
+            String id = source.optString("id" + i);
+            if (id.length() > 0 && toolKeep(id, s)) copySlot(source, out, i, slot++);
+        }
+        for (JSONObject item : extra) if (slot < HOME_SLOTS) writeSlotItem(out, item, slot++);
+        for (; slot < HOME_SLOTS; slot++) blankSlot(out, slot);
+        if (kept.isEmpty() && extra.isEmpty()) out.put("king_switch", "0");
+        moveMoreToolsLast(out);
+        applyColorIcons(out, host);
+        return out;
+    }
+
+    /** 高德原生宫格把「更多工具」当作收尾格：它必须在最后一个有效槽位，否则后面不再渲染。 */
+    private static void moveMoreToolsLast(JSONObject out) {
+        try {
+            int more = -1, last = -1;
+            for (int i = 0; i < HOME_SLOTS; i++) {
+                String id = out.optString("id" + i);
+                if (id.length() == 0) continue;
+                last = i;
+                if (MORE_TOOLS.equals(id)) more = i;
+            }
+            if (more < 0 || last < 0 || more == last) return;
+            for (String f : SLOT_FIELDS) {
+                String km = f + more, kl = f + last;
+                boolean hm = out.has(km), hl = out.has(kl);
+                Object vm = hm ? out.opt(km) : null, vl = hl ? out.opt(kl) : null;
+                if (hl) out.put(km, vl); else out.remove(km);
+                if (hm) out.put(kl, vm); else out.remove(kl);
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 「工具图标统一彩绘（实验）」：把首页工具栏每个槽位的图标换成高德「更多工具」目录里的
+     * 彩绘圆底 PNG（{@code tool_list_data[*].iconV2}）。
+     *
+     * <p>原生首页的 {@code imageUrlRender} 对第二行工具给的是线条 token 图，而
+     * {@code tool_list_data.iconV2} 是同一工具的彩色圆底图（实测饱和度 0.76~0.87）。
+     * 这里只改数据：把 URL 换成目录里的彩绘 PNG，并去掉 {@code imageToken}/{@code imageClass}，
+     * 让原生 {@code DtImageView} 走 URL 分支。**不自绘、不发明资源**。
+     */
+    private static void applyColorIcons(JSONObject out, java.util.Map<String, JSONObject> host) {
+        try {
+            if (!Config.toolColorIcon()) return;
+            for (int i = 0; i < HOME_SLOTS; i++) {
+                String id = out.optString("id" + i);
+                if (id.length() == 0) continue;
+                JSONObject item = host.get(id);
+                if (item == null) continue;
+                String icon = item.optString("iconV2", item.optString("imageV2", ""));
+                if (icon.length() == 0 || icon.startsWith("@")) continue;
+                out.put("imageUrlRender" + i, icon);
+                out.remove("imageToken" + i);
+                out.remove("imageClass" + i);
+                out.put("displayImage" + i, "flex");
+                out.put("display" + i, "flex");
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * 用 {@code k84.f()} 默认清单里的原生 slot 字段补全目录条目缺的图标字段。
+     *
+     * <p>宿主的 {@code tool_list_data} 目录条目只有 icon URL（没有 {@code imageClass}），
+     * 而「步行 / 骑行」这类 token 图标必须有 {@code imageClass} 才有彩色圆形底 —— 否则
+     * 原生渲染出来就是一条细线。默认清单 {@code k84.f()} 里同一工具带完整原生字段。
+     */
+    private static void mergeDefaultIcon(JSONObject item, String id) {
+        try {
+            JSONObject def = defaultSlot(id);
+            if (def == null) return;
+            for (String f : new String[]{"imageClass", "imageToken", "imageUrlRender", "imageLegacy",
+                    "icon", "size", "containerClass", "displayImage", "displayLottie",
+                    "isLottie", "moreItem"}) {
+                if (!item.has(f) && def.has(f)) item.put(f, def.opt(f));
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /** 从宿主默认工具清单 {@code k84.f()} 里取某个 id 的原始 slot 对象（只读）。 */
+    private static JSONObject defaultSlot(String id) {
+        try {
+            ClassLoader cl = Thread.currentThread().getContextClassLoader();
+            if (cl == null) cl = AmapData.class.getClassLoader();
+            Class<?> k = cl.loadClass("k84");
+            Object raw = k.getMethod("f").invoke(null);
+            if (!(raw instanceof String)) return null;
+            JSONObject d = new JSONObject((String) raw);
+            for (int i = 0; i < 16; i++) {
+                if (!id.equals(d.optString("id" + i))) continue;
+                JSONObject slot = new JSONObject();
+                for (String f : SLOT_FIELDS) if (d.has(f + i)) slot.put(f, d.opt(f + i));
+                return slot;
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    /** Write one cell from a host catalogue item (all ids/schemas/icons are the app's own). */
+    private static void writeSlotItem(JSONObject to, JSONObject item, int target) throws Exception {
+        String id = item.optString("id");
+        String schema = item.optString("schema");
+        // 先整份复制宿主导出的 slot 字段（含 imageClass / imageToken / containerClass 等），
+        // 再按需覆盖；只挑几个字段会把「彩色圆形底」这种原生属性丢掉。
+        for (String field : OFFICIAL_FIELDS) if (item.has(field)) to.put(field + target, item.opt(field));
+        to.put("id" + target, id);
+        to.put("name" + target, item.optString("name"));
+        to.put("schema" + target, schema);
+        String itemSize = item.optString("size");
+        to.put("size" + target, itemSize.endsWith("px") ? itemSize : "90px");
+        to.put("isLottie" + target, false);
+        to.put("displayLottie" + target, "none");
+        to.put("displayImage" + target, "flex");
+        to.put("lottieUrlRender" + target, "");
+        to.put("display" + target, "flex");
+        to.put("moreItem" + target, MORE_TOOLS.equals(id));
+        // 图标：宿主目录条目的图标键有 imageToken / imageLegacy / icon / iconV2 多种拼写，
+        // 只读 iconV2 会让「带 token 但不带 URL」的工具在原生槽位上缺图。
+        // **保守约束**：已有 imageToken / imageUrlRender 时绝不改写。
+        if (!item.has("imageToken") && !item.has("imageUrlRender")) {
+            String icon = item.optString("iconV2", item.optString("imageV2", item.optString("image")));
+            if (icon.length() == 0) icon = AmapToolIcons.imageOf(item);
+            if (icon.startsWith("@")) to.put("imageToken" + target, icon.substring(1));
+            else to.put("imageUrlRender" + target, icon);
+        }
+        to.put("itemDataForClick" + target, android.net.Uri.encode(
+                new JSONObject().put("schema", schema).toString()));
+    }
+
     private static void writeSlot(JSONObject to, String[] entry, int target) throws Exception {
         JSONObject item = AmapToolCatalog.item(entry);
         String id = item.optString("id");
@@ -271,16 +641,19 @@ public final class AmapData {
                 new JSONObject().put("schema", schema).toString()));
     }
 
-    /** A cell the renderer skips: it walks {@code id<i>} and ignores any cell sized 0. */
-    private static void blankSlot(JSONObject to, int index) throws Exception {
-        to.put("id" + index, "");
-        to.put("size" + index, "0px");
-        to.put("schema" + index, "");
-        to.put("name" + index, "");
-        to.put("display" + index, "none");
-        to.put("displayImage" + index, "none");
-        to.put("displayLottie" + index, "none");
-        to.put("itemDataForClick" + index, "");
+    /**
+     * A slot the host must not see at all.
+     *
+     * <p>Measured on 17.02 (classes5, ToolboxPanelV2.init -> toolbox.a.a):
+     * {@code a.a} pre-validates every {@code size<i>} it can find with
+     * {@code optString("size"+i)} -> {@code endsWith("px")} -> {@code parseInt}. A key that
+     * exists but is empty (or {@code "0px"}) makes {@code parseInt} yield 0, and the whole
+     * payload is thrown away and replaced by the built-in {@code k84.f()} default. Only a
+     * <b>missing</b> key ({@code JSONObject.has} == false) makes the pre-check skip cleanly.
+     * So an unused slot is removed, never written as an empty value.
+     */
+    private static void blankSlot(JSONObject to, int index) {
+        for (String field : SLOT_FIELDS) to.remove(field + index);
     }
 
     /**
@@ -342,8 +715,12 @@ public final class AmapData {
         if ("frequentlocations".equals(key) || "frequentlocation".equals(key))
             return s.enabled(Config.K_HOME_CHIPS);
         if ("contentcenterfeed".equals(key)) return s.enabled(Config.K_FEED_CONTENT);
-        if ("taxiqs".equals(key) || "taxiqsmarket".equals(key))
-            return !s.enabled(Config.K_RIDE_CARD_OFF);
+        // 「去哪里打车」卡（17.02 真机：LLM 流里 cardName=taxiQS，aiqs cardList 里
+        // dataType=ShareTripTaxiCard）——统一只认新键 K_TAXI_CARD。
+        // 不再看 K_RIDE_CARD_OFF：旧键是遗留开关，若继续参与判断，用户打开新开关后
+        // 只要旧键还是默认「开」，打车卡就永远出不来（17.02 真机实测就是这个现象）。
+        if ("taxiqs".equals(key) || "taxiqsmarket".equals(key)
+                || "sharetriptaxicard".equals(key)) return s.enabled(Config.K_TAXI_CARD);
         return true;
     }
 
@@ -352,8 +729,16 @@ public final class AmapData {
         JSONObject component = source.optJSONObject("component");
         if (component == null) return source;
         String name = cardName(source);
-        boolean hide = !cardVisible(name, s);
         boolean terminal = source.optBoolean("is_done") || source.optBoolean("isDone");
+        // ★ 安全网（本次「炸开」修复的核心之一）：四个内容类开关全关时，推荐画布
+        // 只可能是为了「去哪里打车」卡才建的（AmapNativeHome.COMPACT 只认 K_TAXI_CARD）。
+        // 此时流里的每一张卡都不该出现 —— 不依赖 cardName 是否认识，一律丢弃。
+        // 这样即使 17.02 改了卡片名（cardVisible 认不出），也不可能出现"打车 ON ⇒
+        // 天气/榜单/内容流一起炸开"。
+        boolean anyFeed = s.enabled(Config.K_FEED_WEATHER) || s.enabled(Config.K_FEED_BOARD)
+                || s.enabled(Config.K_FEED_CONTENT) || s.enabled(Config.K_FEED_FESTIVAL);
+        if (!anyFeed && !terminal) return null;
+        boolean hide = !cardVisible(name, s);
         if (hide && !terminal) return null;
         boolean stopPaging = terminal && !s.enabled(Config.K_FEED_BOARD) && !s.enabled(Config.K_FEED_CONTENT);
         if (!hide && !stopPaging) return source;
@@ -409,6 +794,36 @@ public final class AmapData {
             if (("PopularActivitiesCardV4".equals(type) || "PopularActivitiesCardV5".equals(type))
                     && !s.enabled(Config.K_MY_PROMO_ROW)) continue;
             if ("ContentCenterFeedCard".equals(type) && !s.enabled(Config.K_MY_GUESS)) continue;
+            // ── 15.21 真值（2026-10-26 探针）：dataType 与 17.02 不同 ──
+            if (IS_1521) {
+                if ("MineNewBEntranceCard".equals(type)) {
+                    JSONObject content = card.optJSONObject("content");
+                    if (content != null) {
+                        if (!s.enabled(Config.K_MY_ORDER_ROW)) {
+                            content.put("entranceList_1", new JSONArray());
+                            content.put("entranceList", new JSONArray());
+                            H.log("event=mine1521_strip dataType=" + type + " key=" + Config.K_MY_ORDER_ROW);
+                        }
+                        if (!s.enabled(Config.K_MY_SERVICE_ROW)) {
+                            content.put("entranceList_2", new JSONArray());
+                            H.log("event=mine1521_strip dataType=" + type + " key=" + Config.K_MY_SERVICE_ROW);
+                        }
+                    }
+                }
+                if ("MineNewDoubleRowCard".equals(type) && !s.enabled(Config.K_MY_SERVICE_ROW)) {
+                    H.log("event=mine1521_strip dataType=" + type + " key=" + Config.K_MY_SERVICE_ROW);
+                    continue;
+                }
+                if ("MineGoodsDisplayCard".equals(type) && !s.enabled(Config.K_MY_PROMO_ROW)) {
+                    H.log("event=mine1521_strip dataType=" + type + " key=" + Config.K_MY_PROMO_ROW);
+                    continue;
+                }
+                if (("PopularActivitiesCard".equals(type) || "MineScrollerWithIndicatorTemplate".equals(type))
+                        && !s.enabled(Config.K_MY_TASK)) {
+                    H.log("event=mine1521_strip dataType=" + type + " key=" + Config.K_MY_TASK);
+                    continue;
+                }
+            }
             if ("MineNewBEntranceCardV3".equals(type) || "MineNewBEntranceCardV4".equals(type)) {
                 JSONObject content = card.optJSONObject("content");
                 if (content != null) {

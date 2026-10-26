@@ -54,6 +54,11 @@ public final class MainHook {
         try {
             H.log(Log.INFO, TAG, "event=install_begin pkg=" + pkg);
             BaiduHooks.install(cl);
+            // 省电杠杆（推送长连接 / 后台常驻服务 / 定时任务 / 桌面小组件 / 埋点）。
+            // 放在 bmapclean 里 ⇒ **百度内置版和模块版共用同一份实现**（模块包含三家），
+            // 不必把 mapadkiller 塞进百度内置版（用户要求"不要混包"）。
+            // 每一档都是安装期门控：开关关掉 ⇒ 连 hook 都不装 ⇒ 零性能开销。
+            BaiduPower.install(cl, pkg);
         } catch (Throwable t) {
             H.log(Log.ERROR, TAG, "event=install_failed pkg=" + pkg, t);
         } finally {

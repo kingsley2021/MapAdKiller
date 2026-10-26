@@ -8,11 +8,16 @@ public final class AmapHooks {
         Class<?> preloader = H.cls(cl, "com.autonavi.bundle.amaphome.impl.BootBizDataPreloaderImpl");
         H.hookSig(preloader, "canShowSplash", "amap_splash_gate", H.FALSE);
         feature("search", new Runnable() { public void run() { HotWordGuard.install(cl); } });
+        feature("search_grid", new Runnable() { public void run() { AmapSearchGrid.install(cl); } });
         feature("home", new Runnable() { public void run() { AmapNativeHome.install(cl); } });
         feature("tabs", new Runnable() { public void run() { AmapTabLayout.install(cl); } });
         feature("widgets", new Runnable() { public void run() { AmapMapWidget.install(cl); } });
         feature("labels", new Runnable() { public void run() { AmapPoiLayer.install(cl); } });
         feature("data", new Runnable() { public void run() { AmapProtocolHooks.install(cl); } });
+        // 15.21.0.2038 专用：首页信息流 + 工具宫格（版本前缀匹配，17.02 不进入）。
+        feature("feed1521", new Runnable() { public void run() { AmapFeed1521.install(cl); } });
+        feature("tools1521", new Runnable() { public void run() { AmapToolbox1521.install(cl); } });
+        feature("mine1521", new Runnable() { public void run() { AmapMine1521.install(cl); } });
         // 长按「我的」入口是**免 root 内置版专属**（root/LSPosed 用户用模块 App 的设置页）。
         // 在安装层就跳过，避免"装了 hook 再让面板打不开"的隐性开销。
         feature("mine_entry", new Runnable() { public void run() {
@@ -22,6 +27,7 @@ public final class AmapHooks {
             }
             AmapMineEntry.install(cl);
         } });
+        feature("cruise", new Runnable() { public void run() { AmapCruise.install(cl); AmapCruise.installProbe(cl); } });
         feature("place_recommend", new Runnable() { public void run() {
             try { AmapPlaceAds.install(cl); }
             catch (Exception error) { throw new IllegalStateException(error); }

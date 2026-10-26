@@ -118,6 +118,25 @@ public final class FloatingHooks {
     }
 
     private static void hook(final Application application, final String hostPackage) {
+            // 救命通道：内置版关掉悬浮窗后没有任何 UI 入口（MainActivity 被裁掉了）。
+            // 这个 receiver 让"关掉之后还能救回来"成为可能：
+            //   adb shell am broadcast -a io.github.ldxm666.mapadkiller.RESTORE_FLOAT
+            // 收到后把 float_enabled 写回 true 并立刻重新挂载，不需要清数据。
+            try {
+                application.registerReceiver(new android.content.BroadcastReceiver() {
+                    @Override public void onReceive(android.content.Context c, android.content.Intent i) {
+                        try {
+                            FloatingConfig.write(FloatingConfig.K_FLOAT_ENABLED, true);
+                            FloatingController.reattachAll();
+                            Log.i(TAG, "event=float_restored via=broadcast");
+                        } catch (Throwable t) {
+                            Log.w(TAG, "float restore failed: " + t.getClass().getName());
+                        }
+                    }
+                }, new android.content.IntentFilter("io.github.ldxm666.mapadkiller.RESTORE_FLOAT"));
+                Log.i(TAG, "event=float_restore_channel ready");
+            } catch (Throwable ignored) { }
+
         try {
             application.registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
                 @Override public void onActivityCreated(Activity activity, Bundle state) {

@@ -105,6 +105,17 @@ static final class Group {
         this.link = link;
         this.about = false;
     }
+    /** Flat item list plus a one-tap action: the 省电 page of vendors without sub-sections. */
+    Group(String label, Item[] items, String note, Action action) {
+        this.label = label;
+        this.items = items;
+        this.sections = null;
+        this.metrics = null;
+        this.note = note;
+        this.action = action;
+        this.link = null;
+        this.about = false;
+    }
     /** Sections are {title, Item[]} pairs, used by the tool catalogue. */
     Group(String label, Object[][] sections, String note) {
         this(label, sections, note, null);

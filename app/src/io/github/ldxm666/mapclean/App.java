@@ -157,6 +157,9 @@ public final class App extends Application implements XposedServiceHelper.OnServ
         try { io.github.ldxm666.bmapclean.App.onBind(s); } catch (Throwable t) { Log.w(TAG, "baidu bind", t); }
         // 腾讯组（tmapclean_config）的读写全靠这一句。
         try { io.github.ldxm666.tmapclean.App.onBind(s); } catch (Throwable t) { Log.w(TAG, "tencent bind", t); }
+        // 服务刚可用：重判一次悬浮窗总开关。首次读发生在服务未绑定时，会回落到默认值（内置版 = 开），
+        // 用户看到的就是「明明关掉了，重开 App 又出现」。
+        try { FloatingController.refreshEnabled(); } catch (Throwable ignored) { }
         // 每天最多一次的后台自动检查：只要用户今天开过一次高德，当天就会查
         // （24h 节流在 UpdateChecker 内部，失败也计时，不会每次启动都重试）。
         try {

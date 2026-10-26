@@ -23,9 +23,20 @@ public:
         prepare();
         return install();
     }
+    /** True once the framework has handed over its inline-hook primitive. */
+    bool bound(){
+        std::lock_guard<std::mutex> guard(mutex_);
+        return hook_!=nullptr;
+    }
 private:
     bool install(){
-        if(host_==NativeHost::Other || !hook_)return true;
+        // The framework is the only source of the inline-hook primitive, so reporting success
+        // without it is worse than failing: the Java side would believe the filter is armed
+        // while every asset open still passes through untouched. That is exactly how a dead
+        // 地图标注 switch used to look "installed" (configure returned accepted=1 with no hook
+        // bound at all), so the unbound case now fails loudly.
+        if(!hook_)return false;
+        if(host_==NativeHost::Other)return true;
         if(!attempted_){attempted_=true;success_=installer_(host_,hook_,api_);}
         return success_;
     }

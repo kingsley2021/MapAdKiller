@@ -7,7 +7,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.LinearLayout;
 import android.widget.TextView;
-import android.graphics.Color;
 import java.lang.reflect.Method;
 import java.util.Collections;
 import java.util.Set;
@@ -30,14 +29,23 @@ public final class AmapNativeHome {
      * after the home page happened to be rebuilt, which read as "开关无效".
      */
     private static volatile Method factoryMethod, chipsMethod, skeletonMethod;
+    /** 17.02 活面板 ToolboxPanelV2 的实例方法 buildHomeAndCompanyView(Context,String,int,JSONObject)。 */
+    private static volatile Method v2ChipsMethod;
     /** How the live container was built, so it can be built again the same way. */
     private static volatile Built built;
     /** The live ToolboxPanel; its content is swapped instead of waiting for a rebuild. */
     private static volatile java.lang.ref.WeakReference<View> panelRef;
     /** The 「设置家 / 设置单位 / 常去地点」 payload, cached even while the row is suppressed. */
     private static volatile JSONObject chipsPayload;
+    /** chips 行里的文字 View -> 格序号（0 家 / 1 单位 / 2 常去地点），用于状态刷新。 */
+    private static final java.util.Map<View, Integer> chipLabels =
+            new WeakHashMap<View, Integer>();
+    /** 我们亲手产出的 chips 行（原生构建成功或自绘兜底），供 V2 原地增删时识别。 */
+    private static final Set<View> chipsRows = Collections.newSetFromMap(new WeakHashMap<View, Boolean>());
     /** Switch state the live container was built with; see {@link #signature()}. */
     private static volatile String builtSignature = "";
+    /** 最近一次读 uid 的来源：account / empty，用于日志自证。 */
+    private static volatile String lastUidSource = "empty";
     private AmapNativeHome() {}
 
     /**
@@ -54,9 +62,15 @@ public final class AmapNativeHome {
      */
     private static final Config.Flag COMPACT = new Config.Flag() {
         @Override protected boolean compute() {
+            // ★ 打车卡**不参与**本判定（铁律，勿加回）。
+            // 历史的坑：把 visible(K_TAXI_CARD) 写进合取式，用户只要打车卡 ⇒ COMPACT=false
+            // ⇒ loadAjxQs 不返回 null、preloadAIData 放行 ⇒ 整块推荐画布重建 ⇒
+            // 天气 / 扫街榜 / 内容流 / 出行节跟着一起"炸开"。
+            // 现在「是否建画布」只由四个**内容**开关决定；打车卡的收放完全交给
+            // AmapFeed1521 的 dataType 白名单在数据层解决（cardList 里只留打车家族）。
             return compactSupported && !Config.visible(Config.K_FEED_WEATHER)
                 && !Config.visible(Config.K_FEED_BOARD) && !Config.visible(Config.K_FEED_CONTENT)
-                && !Config.visible(Config.K_FEED_FESTIVAL) && Config.visible(Config.K_RIDE_CARD_OFF);
+                && !Config.visible(Config.K_FEED_FESTIVAL);
         }
     };
 
@@ -222,7 +236,7 @@ public final class AmapNativeHome {
         }
         H.hookSig(homeCompany, "a", "amap_native_home_chips", new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                return chipsHook(chain, cl);
+                return chipsHook(chain, cl, "s03_build");
             }
         }, Context.class, String.class, int.class, JSONObject.class);
         // 17.00.0.2005 的首页实际走 ToolboxPanelV2 自己构建「设置家 / 设置单位 / 常去地点」，
@@ -231,13 +245,81 @@ public final class AmapNativeHome {
         // 只挂 g13 的话，这个开关在这个版本永远是死的 —— 切换了也不会 HIT。
         // 签名与 g13.a 完全一致 (Context, String, int, JSONObject)，所以共用一段逻辑。
         Class<?> v2 = H.cls(cl, "com.autonavi.bundle.amaphome.lite.quickservice.toolbox.ToolboxPanelV2");
+        v2ChipsMethod = H.method(v2, "buildHomeAndCompanyView",
+                Context.class, String.class, int.class, JSONObject.class);
         H.hookSig(v2, "buildHomeAndCompanyView", "amap_v2_home_chips", new XposedInterface.Hooker() {
             @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                return chipsHook(chain, cl);
+                return chipsHook(chain, cl, "v2_build");
             }
         }, Context.class, String.class, int.class, JSONObject.class);
+        // ── 17.02 真机根因（B）：服务端不下发 home_and_company_data ────────────────────
+        // `ToolboxPanelV2.init` 的字节码是：读 main_page/home_and_company_data →
+        // TextUtils.isEmpty → 为空则整段跳过 → 才调 buildHomeAndCompanyView。
+        // 真机日志 `search_grid_helper op=get key=home_and_company_data len=0` 证明该值恒空，
+        // 所以上面两个 chips 钩子在这台机器上**永远不会 HIT**（不是钩错方法，是宿主不调）。
+        // 修法：**纯内存注入** —— hook wm3.c 的返回值，只在 init 线程上把空值换成合成 payload。
+        // 不写 main_page.xml / 不写任何宿主 prefs；渲染仍由宿主 buildHomeAndCompanyView 完成。
+        H.hookSig(v2, "init", "amap_v2_home_chips_init", new XposedInterface.Hooker() {
+            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object result;
+                IN_TOOLBOX_INIT.set(Boolean.TRUE);
+                try {
+                    result = chain.proceed();
+                } finally {
+                    IN_TOOLBOX_INIT.remove();
+                }
+                ensureV2ChipsRow((View) chain.getThisObject(), cl,
+                        String.valueOf(chain.getArg(1)), ((Integer) chain.getArg(2)).intValue(), "v2_init");
+                return result;
+            }
+        }, Context.class, String.class, int.class, boolean.class);
+        // wm3.c(String,String)String 是 V2/V3.init 读 home_and_company_data 的唯一入口
+        // （DEX: classes5.dex 0x4057c0）。只在 IN_TOOLBOX_INIT 线程上替换，别的读取方
+        // （搜索页等）完全不受影响。
+        Class<?> helper = H.cls(cl, "wm3");
+        if (helper == null) {
+            H.log("event=home_chips_miss reason=no_wm3_helper");
+        } else {
+            H.hookSig(helper, "c", "amap_native_home_chips_payload", new XposedInterface.Hooker() {
+                @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                    Object original = chain.proceed();
+                    Object key = chain.getArg(0);
+                    if (!(key instanceof String) || !KEY_HOME_COMPANY.equals(key)) return original;
+                    String injected = injectChipsPayload(cl, original);
+                    String base = injected != null ? injected
+                            : (original == null ? null : String.valueOf(original));
+                    if (base == null || base.length() == 0) return original;
+                    if (!Config.visible(Config.K_HOME_CHIPS)) return original;
+                    // 服务端快照不会在用户设置家/单位后刷新 ⇒ 只改内存里的 name 文案，
+                    // 其它字段（icon/scheme/样式）原样保留，渲染仍是高德原生行。
+                    String relabeled = relabelChips(base, cl);
+                    if (!relabeled.equals(base)) {
+                        H.log("event=home_chips_relabel home=" + homeSet(cl)
+                                + " company=" + companySet(cl) + " len=" + base.length());
+                        return relabeled;
+                    }
+                    if (injected != null) {
+                        H.log("event=home_chips_show via=native_payload hook=wm3_c items=3");
+                        return injected;
+                    }
+                    return original;
+                }
+            }, String.class, String.class);
+        }
         Class<?> v3 = H.cls(cl, "com.autonavi.bundle.amaphome.lite.quickservice.toolbox.v3.ToolboxPanelV3");
         skeletonMethod = H.method(v3, "buildSkeletonView", Context.class, String.class, int.class);
+        H.hookSig(v3, "init", "amap_v3_home_chips_init", new XposedInterface.Hooker() {
+            @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
+                Object result;
+                IN_TOOLBOX_INIT.set(Boolean.TRUE);
+                try {
+                    result = chain.proceed();
+                } finally {
+                    IN_TOOLBOX_INIT.remove();
+                }
+                return result;
+            }
+        }, Context.class, String.class, int.class);
         H.hookSig(v3, "buildSkeletonView", "amap_native_skeleton", new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     if (!compact()) return chain.proceed();
@@ -278,7 +360,9 @@ public final class AmapNativeHome {
             H.hookSig(factory,
             "a", "amap_native_tools", new XposedInterface.Hooker() {
                 @Override public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    Object result = chain.proceed();
+                    // 显式传当前 chain 的参数（外层 amap_tool_factory 已替换第 4 个参数）；
+                    // 无参 proceed() 在部分框架实现里会回退原始参数，过滤后的 payload 会被丢掉。
+                    Object result = chain.proceed(chain.getArgs().toArray());
                     if (result instanceof ViewGroup) remember(chain, (ViewGroup) result);
                     return result;
                 }
@@ -414,6 +498,235 @@ public final class AmapNativeHome {
      * 两处都是**幂等**的：{@code AmapData.toolbox} 在"没有需要过滤的格子"时直接返回原对象，
      * 所以重复过滤、schema 不匹配、解析失败都不会有副作用（解析失败原样放行）。
      */
+
+    /**
+     * Replace the host's five-cell row with our own grid, then append the
+     * 「设置家 / 设置单位 / 常去地点」 row to the same container.
+     *
+     * <p>把 chips 行放在这里（而不是 ToolboxPanelV2 的根节点）有两个原因：
+     * 1) 位置天然正确 —— 工具行下方、AI 卡上方，与高德原生顺序一致；
+     * 2) 面板每次重建都会经过 toolbox.a.a，所以开关切换后重新进首页必定重新走这里。
+     */
+    /**
+     * ★ 自绘「设置家 / 设置单位 / 常去地点」——**默认关闭**。
+     *
+     * <p>官方高德自带这一行（`ToolboxPanelV2.buildHomeAndCompanyView` 从服务端
+     * `home_and_company_data` 渲染）。模块模式下两行会同时出现（自绘 + 原生），
+     * 用户明确要求「只保留最下方原生行，自绘的不要」。
+     *
+     * <p>自绘只在宿主完全没有这一行时才有意义（如某些内置版机型拿不到 payload）。需要时置 true。
+     */
+    private static final boolean SELF_DRAW_CHIPS = false;
+
+    /**
+     * ★ 自绘工具宫格——**默认关闭**：UI 完全交给高德原生渲染，模块只做数据过滤。
+     *
+     * <p>{@code decorateHomeRow(row)} 的 {@code row} 就是
+     * {@code toolbox.a.a(ctx,name,int,JSONObject,delegate)} 的返回值，即高德**已经建好**的原生
+     * 宫格容器。模块在该调用的第 4 个参数上做 payload 过滤（见 {@code installToolFilter}），
+     * 所以只要不 {@code removeAllViews()}、不 {@code addView(homeGrid)}，原生宫格拿到的
+     * 本来就是过滤后的格子 —— 数据过滤与 UI 渲染互不影响。
+     *
+     * <p>{@link #homeGrid} / {@link #toolCell} / {@link AmapToolIcons} / {@link AmapToolCatalog}
+     * 保留不删；只有宿主完全拿不到原生宫格时才把本开关置 true。
+     */
+    private static final boolean SELF_DRAW_TOOL_GRID = false;
+
+    /** 原生宫格日志只报一次（面板每次重建都会走 decorateHomeRow，不节流会刷屏）。 */
+    private static volatile boolean nativeToolGridReported;
+
+
+    /**
+     * 放行原生宫格的行间距 —— 不改任何子 View 的结构，只做两件事：
+     *
+     * <p>1) {@code setClipChildren(false)} / {@code setClipToPadding(false)}：宿主把每个工具格子
+     * 塞进「行」DtLinearLayout 里，行的实测高度比格子内容矮 17px（真机 1440x3200 / 560dpi
+     * 实测：行 2 图标宽 142、高只有 125，圆形顶边被切平）。关掉裁剪后图标能画到行外。
+     *
+     * <p>2) 给第 2 行及以后的行补一点 topMargin，把行距真正拉开（用户要求「拓宽一点」）。
+     *
+     * <p>每个 View 实例只处理一次（面板每次重建都会走这里，用 tag 去重），
+     * 不修改宿主任何绘制逻辑、不自绘图标。
+     */
+    private static void relaxToolRows(ViewGroup grid, Context ctx) {
+        try {
+            if (grid == null || ctx == null) return;
+            if (RELAXED_GRIDS.put(grid, Boolean.TRUE) != null) return;
+
+            grid.setClipChildren(false);
+            grid.setClipToPadding(false);
+
+            float density = ctx.getResources().getDisplayMetrics().density;
+            int extra = (int) (10f * density + 0.5f);   // 10dp，约 26px @560dpi
+
+            for (int i = 0; i < grid.getChildCount(); i++) {
+                View row = grid.getChildAt(i);
+                if (row == null) continue;
+                if (row instanceof ViewGroup) {
+                    ((ViewGroup) row).setClipChildren(false);
+                    ((ViewGroup) row).setClipToPadding(false);
+                }
+                if (i == 0) continue;
+                ViewGroup.LayoutParams lp = row.getLayoutParams();
+                if (lp instanceof ViewGroup.MarginLayoutParams) {
+                    ViewGroup.MarginLayoutParams mlp = (ViewGroup.MarginLayoutParams) lp;
+                    mlp.topMargin = mlp.topMargin + extra;
+                    row.setLayoutParams(mlp);
+                } else if (lp != null) {
+                    lp.height = lp.height > 0 ? lp.height + extra : ViewGroup.LayoutParams.WRAP_CONTENT;
+                    row.setLayoutParams(lp);
+                }
+            }
+            H.log("event=amap_tool_rows_relax extra_px=" + extra + " rows=" + grid.getChildCount());
+        } catch (Throwable t) {
+            H.log("event=amap_tool_rows_relax error=" + t);
+        }
+    }
+
+    /** 已处理过的宫格（面板重建会反复走 decorateHomeRow，用它去重，避免行距越加越大）。 */
+    private static final java.util.WeakHashMap<View, Boolean> RELAXED_GRIDS = new java.util.WeakHashMap<View, Boolean>();
+
+    private static View decorateHomeRow(Object row, ClassLoader cl, Context ctx) {
+        try {
+            if (!(row instanceof ViewGroup) || ctx == null) return (View) row;
+            ViewGroup vg = (ViewGroup) row;
+            if (SELF_DRAW_TOOL_GRID) {
+                vg.removeAllViews();
+            if (vg instanceof LinearLayout) ((LinearLayout) vg).setOrientation(LinearLayout.VERTICAL);
+            if (Config.visible(Config.K_TOOLS_VISIBLE)) {
+                View grid = homeGrid(cl, ctx, night(ctx));
+                if (grid != null) {
+                    vg.addView(grid, new ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                            ViewGroup.LayoutParams.WRAP_CONTENT));
+                    H.log("event=amap_tool_grid cells=" + ((ViewGroup) grid).getChildCount());
+                }
+            }
+            } else {
+                // 原生宫格原样保留：不删子 View、不换容器、不自绘。
+                // 「整块工具栏」开关只映射成可见性（GONE 不占位；重新打开时恢复 VISIBLE）。
+                vg.setVisibility(Config.visible(Config.K_TOOLS_VISIBLE) ? View.VISIBLE : View.GONE);
+                relaxToolRows(vg, ctx);
+                if (!nativeToolGridReported) {
+                    nativeToolGridReported = true;
+                    H.log("event=amap_tool_grid via=native skip_self_draw cells=" + vg.getChildCount());
+                    java.util.List<String> lines = new java.util.ArrayList<String>();
+                    describe(lines, vg, 0);
+                    for (int i = 0; i < lines.size() && i < 60; i++) H.log("amap_native_tool_tree " + lines.get(i));
+                }
+            }
+            if (SELF_DRAW_CHIPS && Config.visible(Config.K_HOME_CHIPS) && findChipsRow(vg) == null) {
+                ViewGroup chipsRow = chips(cl, ctx, localChipsPayload(cl));
+                if (chipsRow != null) {
+                    chipsRows.add(chipsRow);
+                    vg.addView(chipsRow);
+                    applyChipState(cl);
+                    H.log("event=home_chips_show via=self_draw items=3");
+                } else {
+                    H.log("event=home_chips_miss reason=chips_null host=decorateHomeRow");
+                }
+            } else if (!Config.visible(Config.K_HOME_CHIPS)) {
+                H.log("event=home_chips_hide via=decorateHomeRow");
+            }
+            return vg;
+        } catch (Throwable t) {
+            H.log("event=home_chips_miss reason=decorate_failed err=" + t.getClass().getSimpleName());
+            return row instanceof View ? (View) row : null;
+        }
+    }
+
+    private static boolean night(Context ctx) {
+        return (ctx.getResources().getConfiguration().uiMode
+                & android.content.res.Configuration.UI_MODE_NIGHT_MASK)
+                == android.content.res.Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private static View homeGrid(ClassLoader cl, Context ctx, boolean night) {
+        try {
+            java.util.List<JSONObject> items = new java.util.ArrayList<JSONObject>();
+            String raw = ctx.getSharedPreferences("toolbox", Context.MODE_PRIVATE)
+                    .getString("tool_list_data", null);
+            // A fresh install has no cached catalogue yet (tool_list_data is fetched later);
+            // the static catalogue still describes every id/schema/icon, so use it as the base.
+            if (raw != null) {
+                JSONArray cats = new JSONObject(raw).optJSONArray("category");
+                if (cats != null) for (int i = 0; i < cats.length(); i++) {
+                    JSONObject cat = cats.optJSONObject(i);
+                    JSONArray list = cat == null ? null : cat.optJSONArray("tools");
+                    if (list == null) continue;
+                    for (int j = 0; j < list.length(); j++) {
+                        JSONObject it = list.optJSONObject(j);
+                        if (it != null && AmapData.toolVisible(it.optString("id"), AmapData.CURRENT)) items.add(it);
+                    }
+                }
+            }
+            // Tools that exist in the static catalogue but not in the host cache still get a
+            // cell: this grid is drawn by us, so the host's own filter can no longer drop them.
+            java.util.Set<String> present = new java.util.HashSet<String>();
+            for (JSONObject it : items) present.add(it.optString("id"));
+            for (String[] entry : AmapToolCatalog.ENTRIES) {
+                if (present.contains(entry[0]) || !AmapData.toolVisible(entry[0], AmapData.CURRENT)) continue;
+                items.add(AmapToolCatalog.item(entry)); present.add(entry[0]);
+            }
+            if (items.isEmpty()) return null;
+            StringBuilder ids = new StringBuilder();
+            for (JSONObject it : items) { if (ids.length() > 0) ids.append(','); ids.append(it.optString("id")); }
+            H.log("event=amap_tool_grid_items n=" + items.size() + " ids=" + ids);
+            LinearLayout col = new LinearLayout(ctx);
+            col.setOrientation(LinearLayout.VERTICAL);
+            LinearLayout row = null;
+            for (int i = 0; i < items.size(); i++) {
+                if (i % 5 == 0) {
+                    row = new LinearLayout(ctx);
+                    row.setOrientation(LinearLayout.HORIZONTAL);
+                    col.addView(row, new LinearLayout.LayoutParams(-1, -2));
+                }
+                row.addView(toolCell(cl, ctx, items.get(i), night), new LinearLayout.LayoutParams(0, -2, 1));
+            }
+            return col;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static View toolCell(ClassLoader cl, Context ctx, JSONObject item, boolean night) {
+        LinearLayout cell = new LinearLayout(ctx);
+        cell.setOrientation(LinearLayout.VERTICAL);
+        cell.setGravity(android.view.Gravity.CENTER);
+        cell.setPadding(dp(ctx, 2), dp(ctx, 4), dp(ctx, 2), dp(ctx, 4));
+        try {
+            View icon = (View) cl.loadClass("com.amap.bundle.commonui.designtoken.view.DtImageView")
+                    .getConstructor(Context.class).newInstance(ctx);
+            // 图标解析集中到 AmapToolIcons：一条条目有五六种图标写法
+            // （imageToken / imageLegacy / icon / iconV2 / imageV2 …），格子这里自己拼 key
+            // 就必然漏——这正是「有的格子有图、有的格子空白」的由来。
+            AmapToolIcons.load(cl, (android.widget.ImageView) icon,
+                    AmapToolIcons.imageOf(item), null, item.optString("id"));
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(
+                    dp(ctx, AmapToolCatalog.ICON_DP), dp(ctx, AmapToolCatalog.ICON_DP));
+            iconLp.bottomMargin = dp(ctx, AmapToolCatalog.ICON_TEXT_GAP_DP);
+            cell.addView(icon, iconLp);
+        } catch (Throwable ignored) {}
+        TextView label = new TextView(ctx);
+        label.setText(item.optString("name"));
+        // 工具面板是设计令牌卡片，**恒为浅色**。按系统 uiMode 选白字，会在深色主题下把
+        // 文字打成浅色卡上的白字——看起来就是「字太透明、发糊、看不清」。
+        // 规格（13sp / sans-serif-medium / #FF191919 / alpha=1）统一在 AmapToolCatalog。
+        AmapToolCatalog.styleLabel(label);
+        label.setMaxLines(2);
+        cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
+        final String schema = item.optString("schema");
+        cell.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (schema.length() == 0) return;
+                try {
+                    ctx.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(schema))
+                            .setPackage(MainHook.PKG_AMAP).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                } catch (Throwable ignored) {}
+            }
+        });
+        return cell;
+    }
+
     private static void installToolFilter(final ClassLoader cl, final Class<?> factory, final Class<?> panelDelegate) {
         if (factory != null && panelDelegate != null) {
             H.hookSig(factory, "a", "amap_tool_factory", new XposedInterface.Hooker() {
@@ -422,7 +735,26 @@ public final class AmapNativeHome {
                         Object data = chain.getArg(3);
                         if (data instanceof JSONObject) {
                             JSONObject source = (JSONObject) data;
-                            JSONObject out = AmapData.toolbox(source, AmapData.CURRENT, false);
+                            // fill=true: this factory is the single exit that turns the payload into visible
+                            // cells. Filter-only mode could never ADD a tool that the host's own
+                            // cached list did not already contain, which is why every switch
+                            // outside the five defaults appeared dead. Filling here injects the
+                            // enabled catalogue tools into the render payload without touching
+                            // the host's stored list.
+                            JSONObject out = AmapData.toolbox(source, AmapData.CURRENT,
+                                    (Context) chain.getArg(0));
+                            if (!toolGridReported) {
+                                toolGridReported = true;
+                                H.log("event=amap_tool_grid_items before=" + AmapData.slotIds(source)
+                                        + " after=" + AmapData.slotIds(out));
+                                H.log("event=amap_tool_factory_args theme=" + chain.getArg(1)
+                                        + " mode=" + chain.getArg(2));
+                                H.log("event=amap_tool_slot_icons " + slotIconDump(source));
+                                for (int i = 0; i < 10; i++) {
+                                    if (out.optString("id" + i).length() == 0) continue;
+                                    H.log("amap_tool_slot_dump i=" + i + " " + slotDump(out, i));
+                                }
+                            }
                             if (out != source) {
                                 Object[] args = chain.getArgs().toArray();
                                 args[3] = out;
@@ -430,13 +762,15 @@ public final class AmapNativeHome {
                                     toolFactoryReported = true;
                                     H.log("event=amap_tool_factory_filter kept=" + AmapData.slotIds(out));
                                 }
-                                return chain.proceed(args);
+                                Object row = chain.proceed(args);
+                                return decorateHomeRow(row, cl, (Context) chain.getArg(0));
                             }
                         }
                     } catch (Throwable ignored) {
                         // 过滤失败就原样放行：宁可漏一次，也不能让工具面板空白。
                     }
-                    return chain.proceed();
+                    Object row = chain.proceed();
+                    return decorateHomeRow(row, cl, (Context) chain.getArg(0));
                 }
             }, Context.class, String.class, int.class, JSONObject.class, panelDelegate);
         }
@@ -464,12 +798,51 @@ public final class AmapNativeHome {
         }
     }
 
+    /** 单槽位全字段诊断（确认 native 渲染器为什么跳过某格）。 */
+    private static String slotDump(JSONObject p, int i) {
+        StringBuilder sb = new StringBuilder();
+        for (String f : new String[]{"id", "name", "schema", "size", "display", "containerClass",
+                "isLottie", "displayLottie", "displayImage", "imageUrlRender", "imageToken",
+                "imageClass", "imageLegacy", "icon", "moreItem", "weight"}) {
+            String v = p.optString(f + i);
+            if (v.length() > 60) v = v.substring(0, 60) + "…";
+            sb.append(f).append('=').append(v).append(' ');
+        }
+        return sb.toString();
+    }
+
+    /** 102 vs 104 等原生槽位的 icon 字段对比（一次性诊断，只读不改）。 */
+    private static String slotIconDump(JSONObject p) {
+        StringBuilder sb = new StringBuilder();
+        try {
+            for (int i = 0; i < 10; i++) {
+                String id = p.optString("id" + i);
+                if (id.length() == 0) continue;
+                sb.append('#').append(i).append('=').append(id);
+                for (String f : new String[]{"icon", "imageUrlRender", "imageToken", "imageLegacy",
+                        "imageClass", "displayImage", "displayLottie", "size"}) {
+                    String v = p.optString(f + i);
+                    if (v.length() > 0) sb.append(',').append(f).append('=')
+                            .append(v.length() > 48 ? v.substring(0, 48) + "…" : v);
+                }
+                sb.append(' ');
+            }
+        } catch (Throwable ignored) {
+        }
+        return sb.toString();
+    }
+
+    /** 过滤前/后槽位对比日志只报一次。 */
+    private static volatile boolean toolGridReported;
     /** 工厂过滤只报一次（首页每次重建都会走，不节流会刷屏）。 */
     private static volatile boolean toolFactoryReported;
     /** 默认清单上游过滤只报一次。 */
     private static volatile boolean toolDefaultReported;
 
-    private static Object chipsHook(XposedInterface.Chain chain, ClassLoader cl) throws Throwable {
+    private static Object chipsHook(XposedInterface.Chain chain, ClassLoader cl, String via) throws Throwable {
+        // 模块自己反射调 buildHomeAndCompanyView 时原样放行：payload 已由 nativeChipsPayload
+        // 备好（uid 真值 + 完整字段），这里再改一遍只会重复日志 / 重复 relabel。
+        if (Boolean.TRUE.equals(IN_NATIVE_BUILD.get())) return chain.proceed();
         boolean show = Config.visible(Config.K_HOME_CHIPS);
         Object data = chain.getArg(3);
         int items = -1, enable = -1;
@@ -495,7 +868,11 @@ public final class AmapNativeHome {
         } catch (Throwable ignored) { }
 
         if (!show) {
-            H.log("amap_home_chips show=false -> blocked");
+            H.log("event=home_chips_hide via=" + via + " reason=switch_off");
+            return null;
+        }
+        if (payload == null || items <= 0) {
+            H.log("event=home_chips_miss via=" + via + " reason=payload_null items=" + items);
             return null;
         }
 
@@ -505,7 +882,7 @@ public final class AmapNativeHome {
         // The payload is otherwise complete, so align the uid and let the app's own builder
         // render it -- that keeps the row pixel-identical to the native one.
         String alignedUid = null;
-        if (payload != null && items > 0) {
+        if (items > 0) {
             String current = currentUid(cl);
             if (current != null && current.length() > 0 && !current.equals(uid)) {
                 try {
@@ -519,12 +896,21 @@ public final class AmapNativeHome {
 
         // A Chain may only be proceeded once, so the arguments are prepared up front and
         // exactly one call is made.
-        Object built = alignedUid == null ? chain.proceed()
-                : chain.proceed(new Object[]{chain.getArg(0), chain.getArg(1),
-                        chain.getArg(2), payload});
+        Object built;
+        try {
+            built = alignedUid == null ? chain.proceed()
+                    : chain.proceed(new Object[]{chain.getArg(0), chain.getArg(1),
+                            chain.getArg(2), payload});
+        } catch (Throwable error) {
+            chipsFuseBlown = true;
+            H.log("event=home_chips_fuse_blown reason=builder_throw err=" + error.getClass().getSimpleName());
+            return null;
+        }
         if (built != null) {
-            H.log("amap_home_chips built=" + built.getClass().getSimpleName()
-                    + " uid_aligned=" + (alignedUid != null) + " items=" + items);
+            if (built instanceof View) chipsRows.add((View) built);
+            H.log("event=home_chips_show via=native_payload hook=" + via
+                    + " items=" + items + " uid_aligned=" + (alignedUid != null)
+                    + " view=" + built.getClass().getSimpleName());
             return built;
         }
 
@@ -532,7 +918,7 @@ public final class AmapNativeHome {
         // or no items). One line here is enough to tell those apart later.
         String raw = String.valueOf(data);
         if (raw.length() > 300) raw = raw.substring(0, 300) + "...";
-        H.log("amap_home_chips refused enable=" + enable + " items=" + items
+        H.log("amap_home_chips refused via=" + via + " enable=" + enable + " items=" + items
                 + " uid=[" + uid + "] aligned=[" + alignedUid + "] payload=" + raw);
 
         // Last resort: draw the row from the same payload. Unit conversion follows the
@@ -540,10 +926,12 @@ public final class AmapNativeHome {
         if (payload != null && items > 0) {
             ViewGroup fallback = chips(cl, (Context) chain.getArg(0), payload);
             if (fallback != null) {
-                H.log("amap_home_chips fallback_rendered items=" + items);
+                chipsRows.add(fallback);
+                H.log("event=home_chips_show via=fallback_view hook=" + via + " items=" + items);
                 return fallback;
             }
         }
+        H.log("event=home_chips_miss via=" + via + " reason=no_view items=" + items);
         return null;
     }
 
@@ -558,13 +946,446 @@ public final class AmapNativeHome {
             Object instance = manager.getMethod("getInstance").invoke(null);
             Class<?> service = cl.loadClass("com.autonavi.bundle.account.api.IAccountService");
             Object account = manager.getMethod("getBundleService", Class.class).invoke(instance, service);
-            if (account == null) return "";
+            if (account == null) { lastUidSource = "empty"; return ""; }
             Object uid = service.getMethod("getUID").invoke(account);
-            return uid == null ? "" : String.valueOf(uid);
+            if (uid == null || String.valueOf(uid).length() == 0) { lastUidSource = "empty"; return ""; }
+            lastUidSource = "account";
+            return String.valueOf(uid);
         } catch (Throwable t) {
+            lastUidSource = "empty";
             return "";
         }
     }
+
+    /* ---- 17.02 home-chips payload injection (in-memory only) --------------------------
+     * 真机证据（17.02.0.1541 / classes5.dex）：
+     *   ToolboxPanelV2.init code_off=0x41fb68:
+     *     [38] const-string "home_and_company_data"
+     *     [46] invoke-virtual Lwm3;->c(String,String)String     ← 读 main_page 偏好
+     *     [50] TextUtils.isEmpty(...)
+     *     [54] if-*                                            ← 为空则整段跳过
+     *     [61] buildHomeAndCompanyView(...)
+     *   运行期：search_grid_helper op=get key=home_and_company_data len=0
+     *   ⇒ 服务端不下发时宿主根本不建这一行，两个 chips 钩子永远不 HIT。
+     *
+     * 修法（内存注入，绝不落盘）：hook `wm3.c(String,String)String`，只在
+     * 「key == home_and_company_data && 调用线程正处在 ToolboxPanelV2.init 内 &&
+     *   原值为空 && 开关 ON」时返回合成 payload。宿主 init 拿到非空 payload 后会自己调用
+     * `buildHomeAndCompanyView` 原生渲染 ⇒ 样式与点击 100% 原生，且 main_page.xml 一个字节都不写。
+     * 开关 OFF / 服务端真下发了值 ⇒ 原样返回，行自然消失/使用真数据。
+     *
+     * payload 字段全部来自 buildHomeAndCompanyView/buildHomeAndCompanyItem 的 const-string；
+     * 标题与 scheme 抄自高德自己的桌面 widget 默认数据 Lxl5;->g(I)Lt42; (0x4099d4)。
+     */
+    private static final String KEY_HOME_COMPANY = "home_and_company_data";
+
+    /**
+     * ★ 总开关（默认 false）：合成 payload 注入**已停用**。
+     *
+     * <p>原因：注入能让高德的 {@code ToolboxPanelV2.buildHomeAndCompanyView} 真的跑起来，
+     * 但**我们拼的 payload schema 是反推猜的**（`icon`/`background`/`radius`/`textSize` 的
+     * 真实 key 名与类型未确认，`isSameUser` 的 uid 也对不上 ⇒ 日志 `uid_aligned=false`）。
+     * 结果是一行**降级渲染**：无图标、无白卡背景、位置游离在工具行下方 —— 比不显示更难看。
+     *
+     * <p>要重新启用，必须先做到：① 从 `buildHomeAndCompanyItem` 的字节码里逐字段确认
+     * schema；② 拿到高德内部真实 uid。两者都确认后再置 true。
+     */
+    private static final boolean PAYLOAD_INJECT = false;
+    /** 合成 payload 的 JSON 缓存（纯内存，进程重启即消失）。 */
+    private static volatile String localChipsJson;
+    /** 熔断：一旦注入导致构建异常或面板高度异常，本进程内不再注入。 */
+    private static volatile boolean chipsFuseBlown;
+    /** 只在 ToolboxPanelV2/V3.init 的调用线程上允许返回合成 payload。 */
+    private static final ThreadLocal<Boolean> IN_TOOLBOX_INIT = new ThreadLocal<Boolean>();
+    /** 我们自己反射调用 buildHomeAndCompanyView 时置位：让 chipsHook 原样放行，不重复改写/重复日志。 */
+    private static final ThreadLocal<Boolean> IN_NATIVE_BUILD = new ThreadLocal<Boolean>();
+
+    /** 高德自己的 drawable 设计 token（ResourcesUtil 白名单里实测存在，比外网 URL 稳）。 */
+    private static final String ICON_HOME = "@desktop_widget_commute_home";
+    private static final String ICON_COMPANY = "@desktop_widget_commute_company";
+    private static final String ICON_ADD = "@add";
+
+    /**
+     * 原生行用的设计 token 图标：直接抄自高德真机下发的 {@code main_page.xml / home_and_company_data}
+     * 里 items[].iconToken 的值 —— 与 {@code buildHomeAndCompanyItem} 的
+     * {@code DtImageView.proxy().s(icon)}（dt_src 设计 token 解析）完全同源。
+     * 比之前的 tokenImg 外网 URL 更稳（离线可用、跟随主题）。
+     */
+    private static final String TOKEN_HOME = "@Img_QS_home_company_Home";
+    private static final String TOKEN_COMPANY = "@Img_QS_home_company_Company";
+    private static final String TOKEN_ADD = "@Img_QS_home_company_Add";
+    /** 未设置家/单位时的服务端原值：source=0 落到设置页（已设置才换成 source=1 的回家/去单位）。 */
+    private static final String SCHEME_HOME_SET =
+            "amapuri://routecommute?source=0&type=home&subs=0&fromPage=basemap";
+    private static final String SCHEME_COMPANY_SET =
+            "amapuri://routecommute?source=0&type=company&subs=0&fromPage=basemap";
+    /** 高德自己的通勤设置路由（classes4.dex Lzg1;->i(Lt42;)V @0x636780 [174]/[225]）。 */
+    private static final String SCHEME_HOME =
+            "amapuri://routecommute?source=1&type=home&clearStack=1"
+            + "&sourceApplication=widget_card&widgetType=searchtool_card&clickID=home";
+    private static final String SCHEME_COMPANY =
+            "amapuri://routecommute?source=1&type=company&clearStack=1"
+            + "&sourceApplication=widget_card&widgetType=searchtool_card&clickID=company";
+    /** 常去地点管理页（classes5.dex Lxl5;->g(I)Lt42; @0x4099d4 [24] const-string）。 */
+    private static final String SCHEME_FREQ =
+            "amapuri://ajx?path=path://amap_bundle_fre_loc/src/pages/"
+            + "FrequentLocationManage.page.js&transition_mode=fullpage&wvc=1"
+            + "&sourceApplication=widget_card&widgetType=frequent_places&clickID=blank_space";
+
+    private static JSONObject localChipsPayload(ClassLoader cl) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("enable", 1);
+            String uid = currentUid(cl);
+            payload.put("uid", uid == null ? "" : uid);
+            // 数值全部按 buildHomeAndCompanyView/Item 的字节码（tg3.m = ×2）：
+            // height 42 -> 84px；margin left/right 16 -> 32px；spacing 8 -> 16px
+            payload.put("height", 42);
+            JSONArray margin = new JSONArray();
+            margin.put(0); margin.put(0); margin.put(0); margin.put(16);
+            payload.put("margin", margin);
+            payload.put("split", 1);
+            payload.put("spacing", 8);
+            JSONArray items = new JSONArray();
+            items.put(localChipItem("设置家", ICON_HOME, SCHEME_HOME));
+            items.put(localChipItem("设置单位", ICON_COMPANY, SCHEME_COMPANY));
+            items.put(localChipItem("添加常去地点", ICON_ADD, SCHEME_FREQ));
+            payload.put("items", items);
+            H.log("event=home_chips_payload_build items=3 uid_source=" + lastUidSource);
+            return payload;
+        } catch (Throwable t) {
+            H.log("event=home_chips_miss reason=payload_build_failed err=" + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static JSONObject localChipItem(String name, String icon, String scheme) throws Exception {
+        JSONObject item = new JSONObject();
+        item.put("name", name);
+        item.put("icon", icon);
+        item.put("iconToken", icon);
+        // textSize 17 -> m()=34px = 13sp @ density 2.625；padding 16 -> 32px；radius 16 -> 32px
+        item.put("textSize", 15);
+        item.put("textColor", "#e6000000");
+        item.put("paddingLeft", 16);
+        item.put("paddingRight", 16);
+        item.put("radius", 16);
+        item.put("background", "#FFFFFFFF");
+        item.put("scheme", scheme);
+        return item;
+    }
+
+    /**
+     * 给高德原生 builder 用的 payload —— 字段与类型逐个抄自
+     * {@code buildHomeAndCompanyView} / {@code buildHomeAndCompanyItem} 的 const-string：
+     * enable / uid / height / margin[4] / split / spacing / items[]
+     * (name / icon / textSize / textColor / paddingLeft / paddingRight / radius /
+     *  background / scheme)。
+     *
+     * <p>{@code uid} 必须是 {@code IAccountService.getUID()} 的真值，否则
+     * {@code isSameUser} 返回 false、builder 直接 return null —— 这就是之前这一行永远不显示的根因。
+     * {@code m(v) = 2v}（tg3.m），所以这里的数值都是「设计值」，builder 内部会 ×2 转 px。
+     */
+    private static JSONObject nativeChipsPayload(ClassLoader cl) {
+        try {
+            JSONObject payload = new JSONObject();
+            payload.put("enable", 1);
+            String uid = currentUid(cl);
+            if (uid == null) uid = "";
+            payload.put("uid", uid);
+            H.log("event=home_chips_uid source=" + lastUidSource + " value=" + uid);
+            payload.put("height", 64);                 // 高德真实下发值（m()=128px）
+            JSONArray margin = new JSONArray();        // 顺序 [top, right, bottom, left]
+            margin.put(30); margin.put(24); margin.put(0); margin.put(24);   // 高德真实下发值
+            payload.put("margin", margin);
+            // ★ 唯一偏离真值的地方：真值是 0，但那是 V3 横滑容器（每格 WRAP_CONTENT 左对齐）；
+            //   V2 是 3 项横排铺满整行，split=1（width=0, weight=1）才能三等分，否则会挤在左边。
+            payload.put("split", 1);
+            payload.put("spacing", 12);                // 高德真实下发值（m()=24px）
+            JSONArray items = new JSONArray();
+            items.put(nativeChipItem("设置家", TOKEN_HOME, SCHEME_HOME_SET));
+            items.put(nativeChipItem("设置单位", TOKEN_COMPANY, SCHEME_COMPANY_SET));
+            items.put(nativeChipItem("常去地点", TOKEN_ADD, SCHEME_FREQ));
+            payload.put("items", items);
+            // 已设置家/单位 ⇒ name + scheme 成对替换（家→回家 + routecommute type=home，单位同理）。
+            JSONObject out = new JSONObject(relabelChips(payload.toString(), cl));
+            H.log("event=home_chips_payload items=3 uid_source=" + lastUidSource
+                    + " home=" + homeSet(cl) + " company=" + companySet(cl));
+            return out;
+        } catch (Throwable t) {
+            H.log("event=home_chips_miss reason=payload_build_failed err=" + t.getClass().getSimpleName());
+            return null;
+        }
+    }
+
+    private static JSONObject nativeChipItem(String name, String icon, String scheme) throws Exception {
+        JSONObject item = new JSONObject();
+        item.put("name", name);
+        item.put("icon", icon);
+        item.put("textSize", 24);                 // 高德真实下发值（m()=48px）
+        item.put("textColor", "@Color_Text_L1");  // 设计 token，深色模式自动适配
+        item.put("paddingLeft", 24);              // 高德真实下发值
+        item.put("paddingRight", 24);             // 高德真实下发值
+        item.put("radius", 40);                   // 高德真实下发值（m()=80px）
+        item.put("background", "@Color_BG_L2");   // 高德真实下发值（ra0.a → pv1.g 支持 @token）
+        item.put("scheme", scheme);
+        return item;
+    }
+
+    /**
+     * 按「家/单位是否已设置」把 payload 里的 name 文案改掉：
+     * 设置家 -> 回家、设置单位 -> 去单位。只替换 name 字段，不动 icon/scheme。
+     * 兼容 "name":"x" 与 "name": "x" 两种写法（服务端 JSON 可能带空格）。
+     */
+    private static String relabelChips(String json, ClassLoader cl) {
+        if (json == null || json.length() == 0) return json;
+        String out = json;
+        try {
+            if (homeSet(cl)) {
+                out = out.replace("\"name\":\"设置家\"", "\"name\":\"回家\"")
+                         .replace("\"name\": \"设置家\"", "\"name\": \"回家\"");
+                out = replaceScheme(out, "home", SCHEME_HOME);
+            }
+            if (companySet(cl)) {
+                out = out.replace("\"name\":\"设置单位\"", "\"name\":\"去单位\"")
+                         .replace("\"name\": \"设置单位\"", "\"name\": \"去单位\"");
+                out = replaceScheme(out, "company", SCHEME_COMPANY);
+            }
+            // 第 3 项：常去地点 -> 添加常去地点 + 常去地点管理页（服务端给的是搜索页）
+            out = out.replace("\"name\":\"常去地点\"", "\"name\":\"添加常去地点\"")
+                     .replace("\"name\": \"常去地点\"", "\"name\": \"添加常去地点\"");
+            try {
+                String repl = java.util.regex.Matcher.quoteReplacement(SCHEME_FREQ);
+                out = out.replaceAll("\"scheme\"\\s*:\\s*\"[^\"]*SinglePoiSearchPage[^\"]*\"",
+                        "\"scheme\":\"" + repl + "\"");
+                out = out.replaceAll("\"schema\"\\s*:\\s*\"[^\"]*SinglePoiSearchPage[^\"]*\"",
+                        "\"schema\":\"" + repl + "\"");
+            } catch (Throwable ignored) { }
+        } catch (Throwable ignored) { }
+        if (!schemeProbed) {
+            schemeProbed = true;
+            try {
+                int i = out.indexOf("\"scheme\"");
+                H.log("event=home_chips_scheme_probe head="
+                        + out.substring(i, Math.min(out.length(), i + 260)));
+            } catch (Throwable ignored) { }
+        }
+        return out;
+    }
+
+    private static volatile boolean schemeProbed;
+
+    /**
+     * 把 payload 里 type=home/company 的 scheme（以及同值的 schema）换成可导航的
+     * routecommute 路由。服务端原值是 `amapuri://routecommute?source=0&type=home&subs=0
+     * &fromPage=basemap` —— source=0 会落到设置页；source=1 才是回家/去单位导航。
+     */
+    private static String replaceScheme(String json, String type, String scheme) {
+        try {
+            String repl = java.util.regex.Matcher.quoteReplacement(scheme);
+            json = json.replaceAll("\"scheme\"\\s*:\\s*\"[^\"]*type=" + type + "[^\"]*\"",
+                    "\"scheme\":\"" + repl + "\"");
+            json = json.replaceAll("\"schema\"\\s*:\\s*\"[^\"]*type=" + type + "[^\"]*\"",
+                    "\"schema\":\"" + repl + "\"");
+        } catch (Throwable ignored) { }
+        return json;
+    }
+
+    /** wm3.c 的返回值替换：只认 ToolboxPanelV2/V3.init 线程上的 home_and_company_data。 */
+    private static String injectChipsPayload(ClassLoader cl, Object original) {
+        if (!PAYLOAD_INJECT) return null;   // 已停用：见 PAYLOAD_INJECT 注释
+        if (chipsFuseBlown || !Config.visible(Config.K_HOME_CHIPS)) return null;
+        if (!Boolean.TRUE.equals(IN_TOOLBOX_INIT.get())) return null;
+        String value = original == null ? "" : String.valueOf(original);
+        if (value.length() > 0) return null;              // 服务端/宿主已有真数据，绝不覆盖
+        String cached = localChipsJson;
+        if (cached == null) {
+            JSONObject payload = localChipsPayload(cl);
+            if (payload == null) return null;
+            cached = payload.toString();
+            localChipsJson = cached;
+        }
+        return cached;
+    }
+
+    /**
+     * V2.init 之后补行：**直接反射调用高德自己的**
+     * {@code ToolboxPanelV2.buildHomeAndCompanyView(Context,String,int,JSONObject)}，
+     * 把返回的 DtLinearLayout 原样挂到面板根上 —— 与宿主 {@code init} 里的
+     * {@code this.addView(buildHomeAndCompanyView(...))} 是同一个位置、同一个 View 类。
+     *
+     * <p>不自绘（SELF_DRAW_CHIPS 保持 false）、不写宿主 prefs；builder 返回 null 或抛异常
+     * 一律记 fuse_blown 并在本进程内不再重试，绝不影响首页其它部分。
+     */
+    private static void ensureV2ChipsRow(final View panel, ClassLoader cl, String theme, int mode, String via) {
+        if (!(panel instanceof ViewGroup)) return;
+        final ViewGroup parent = (ViewGroup) panel;
+        boolean show = Config.visible(Config.K_HOME_CHIPS);
+        View existing = findNativeChipsRow(parent);
+        if (!show) {
+            if (existing != null) {
+                android.view.ViewParent vp = existing.getParent();
+                if (vp instanceof ViewGroup) ((ViewGroup) vp).removeView(existing);
+                else parent.removeView(existing);
+                chipsRows.remove(existing);
+                H.log("event=home_chips_hide via=" + via);
+            }
+            return;
+        }
+        if (existing != null) {
+            H.log("event=home_chips_skip via=" + via + " reason=exists");
+            return;
+        }
+        if (chipsFuseBlown) {
+            H.log("event=home_chips_miss via=" + via + " reason=fuse_blown");
+            return;
+        }
+        Method builder = v2ChipsMethod;
+        if (builder == null) {
+            H.log("event=home_chips_miss via=" + via + " reason=no_method");
+            return;
+        }
+        JSONObject payload = nativeChipsPayload(cl);
+        if (payload == null) {
+            H.log("event=home_chips_miss via=" + via + " reason=payload_null");
+            return;
+        }
+        Object created;
+        try {
+            IN_NATIVE_BUILD.set(Boolean.TRUE);
+            try {
+                created = builder.invoke(panel, parent.getContext(), theme, mode, payload);
+            } finally {
+                IN_NATIVE_BUILD.remove();
+            }
+        } catch (Throwable t) {
+            chipsFuseBlown = true;
+            H.log("event=home_chips_fuse_blown via=" + via
+                    + " reason=builder_throw err=" + t.getClass().getSimpleName());
+            return;
+        }
+        if (!(created instanceof View)) {
+            chipsFuseBlown = true;
+            H.log("event=home_chips_fuse_blown via=" + via
+                    + " reason=null_view uid_source=" + lastUidSource);
+            return;
+        }
+        final View row = (View) created;
+        chipsRows.add(row);
+        // 宿主 init 的字节码是 `v0.addView(chips)`，v0 = a.a(...) 返回的**工具宫格容器**
+        // （[67] invoke-virtual ViewGroup->addView regs=v0,v2），不是面板根 ——
+        // 所以必须挂进同一个容器，位置才是「工具宫格下面、AI 卡上面」。
+        ViewGroup host = resolveChipsHost(parent);
+        if (host == null) {
+            // 拿不到工具宫格容器（V3 或面板结构不同）⇒ 不插。官方自己有这一行，别叠。
+            H.log("event=home_chips_miss via=" + via + " reason=no_tool_container");
+            return;
+        }
+        int insertAt = Math.min(1, host.getChildCount());
+        host.addView(row, insertAt);
+        dumpPanelChildren(parent);
+        H.log("event=home_chips_insert idx=" + insertAt + " of=" + host.getChildCount()
+                + " after=" + (insertAt > 0 ? host.getChildAt(insertAt - 1).getClass().getName() : "none")
+                + " host=" + host.getClass().getName());
+        H.log("event=home_chips_show via=native_builder view=" + row.getClass().getSimpleName()
+                + " items=" + countItems(payload) + " uid_source=" + lastUidSource
+                + " host=" + via);
+        // 熔断哨兵：3 秒后面板仍挂在窗口上却高度为 0 ⇒ 撤掉这一行并停用，宁可没有也不能毁首页。
+        parent.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (chipsFuseBlown) return;
+                if (!parent.isAttachedToWindow()) return;
+                if (parent.getHeight() > 0) return;
+                chipsFuseBlown = true;
+                View found = findNativeChipsRow(parent);
+                if (found != null) parent.removeView(found);
+                H.log("event=home_chips_fuse_blown reason=panel_height_zero");
+            }
+        }, 3000);
+    }
+
+    /**
+     * 面板根上是否已经挂着「设置家 / 设置单位 / 常去地点」这一行（防重复 add）。
+     * 只认 DtLinearLayout + 文本命中，避免把 AI 卡 / 工具宫格误判成 chips 行。
+     */
+    private static View findNativeChipsRow(ViewGroup panel) {
+        for (int i = 0; i < panel.getChildCount(); i++) {
+            View child = panel.getChildAt(i);
+            if (chipsRows.contains(child)) return child;
+            if (!(child instanceof ViewGroup)) continue;
+            if (child.getClass().getName().endsWith("DtLinearLayout")
+                    && containsChipText((ViewGroup) child)) return child;
+            View nested = findNativeChipsRow((ViewGroup) child);
+            if (nested != null) return nested;
+        }
+        return null;
+    }
+
+    /**
+     * chips 行该挂的容器：宿主原生路径就是 a.a(...) 返回的工具宫格容器。
+     *
+     * <p>★ 只在「拿得到工具宫格容器、且它确实挂在这个面板上」时才返回；否则返回 null。
+     * 绝不再退回面板根 —— 面板根是 FrameLayout，挂上去会叠在工具宫格上面（上一版的 bug），
+     * 而且 V3 页面官方自己已经画了这一行，再插就是重复。
+     */
+    private static ViewGroup resolveChipsHost(ViewGroup panel) {
+        Built current = built;
+        ViewGroup container = current == null ? null : current.container.get();
+        if (container != null && container.getParent() == panel) return container;
+        return null;
+    }
+
+    private static void dumpPanelChildren(ViewGroup panel) {
+        for (int i = 0; i < panel.getChildCount(); i++) {
+            View child = panel.getChildAt(i);
+            H.log("event=panel_child idx=" + i + " cls=" + child.getClass().getName()
+                    + " h=" + child.getHeight() + " w=" + child.getWidth());
+        }
+    }
+
+    private static boolean containsChipText(ViewGroup group) {
+        for (int i = 0; i < group.getChildCount(); i++) {
+            View child = group.getChildAt(i);
+            if (child instanceof android.widget.TextView) {
+                CharSequence text = ((android.widget.TextView) child).getText();
+                if (text == null) continue;
+                String s = text.toString();
+                if (s.contains("设置家") || s.contains("回家")
+                        || s.contains("设置单位") || s.contains("去单位") || s.contains("去公司")
+                        || s.contains("常去地点")) return true;
+            } else if (child instanceof ViewGroup && containsChipText((ViewGroup) child)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static View findChipsRow(ViewGroup panel) {
+        for (int i = 0; i < panel.getChildCount(); i++) {
+            View child = panel.getChildAt(i);
+            if (chipsRows.contains(child)) return child;
+            if (child instanceof ViewGroup) {
+                View nested = findChipsRow((ViewGroup) child);
+                if (nested != null) return nested;
+            }
+        }
+        return null;
+    }
+
+    private static int chipsInsertIndex(ViewGroup panel) {
+        Built current = built;
+        ViewGroup container = current == null ? null : current.container.get();
+        if (container != null && container.getParent() == panel) {
+            return panel.indexOfChild(container) + 1;
+        }
+        return Math.min(1, panel.getChildCount());
+    }
+
+    private static int countItems(JSONObject payload) {
+        JSONArray items = payload == null ? null : payload.optJSONArray("items");
+        return items == null ? 0 : items.length();
+    }
+
 
     /**
      * Rebuild the 「设置家 / 设置单位 / 常去地点」 row when the native builder bails out.
@@ -576,89 +1397,265 @@ public final class AmapNativeHome {
      * here. Every text, target and measurement comes from the app's own payload; nothing is
      * invented.
      */
+    /**
+     * 「设置家 / 设置单位 / 常去地点」自绘行 —— **照高德原生的线性图标 + 文字样式**。
+     *
+     * <h3>为什么自绘而不是注入 payload</h3>
+     * 注入 payload 能让宿主的 {@code buildHomeAndCompanyView} 跑起来，但那份 schema 是我们
+     * 反推猜的（`icon`/`background`/`radius` 的真实 key 与类型未确认，`isSameUser` 的 uid 也对
+     * 不上 ⇒ `uid_aligned=false`），渲染结果是**降级版**：无图标、无背景、位置游离。
+     * 实测比不显示更难看，所以改为自绘，规格照用户确认的原生样式：
+     * <ul>
+     *   <li>三格**等宽均分**（weight=1），整行白底、无卡片、无描边</li>
+     *   <li>每格：**18dp 线性图标 + 6dp 间距 + 13sp 文字**，整体水平居中</li>
+     *   <li>文字 {@code #FF191919} / {@code sans-serif-medium}（与工具栏统一规格）</li>
+     *   <li>行高 44dp，上边距 6dp</li>
+     * </ul>
+     * 图标用本文件内的 {@link ChipGlyph} 绘制（house / building / plus），不依赖 drawable 资源。
+     */
+    /** 自绘「设置家」卡片：第 1 行两列（回家 / 去单位），第 2 行整行（添加常去地点）。 */
     private static ViewGroup chips(ClassLoader cl, Context context, JSONObject payload) {
         try {
             JSONArray items = payload.optJSONArray("items");
-            if (items == null || items.length() == 0) return null;
-            LinearLayout row = new LinearLayout(context);
-            row.setOrientation(LinearLayout.HORIZONTAL);
-            row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-            JSONArray margin = payload.optJSONArray("margin");
-            int top = 0, bottom = 0, left = 0, right = 0;
-            if (margin != null && margin.length() == 4) {
-                // g13: top=margin[0], right=margin[1], bottom=margin[2], left=margin[3]
-                top = px(context, margin.optInt(0));
-                right = px(context, margin.optInt(1));
-                bottom = px(context, margin.optInt(2));
-                left = px(context, margin.optInt(3));
-            }
-            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, px(context, payload.optInt("height")));
-            lp.topMargin = top;
-            lp.bottomMargin = bottom;
-            row.setLayoutParams(lp);
-            row.setPadding(left, 0, right, 0);
-            boolean split = payload.optInt("split") == 1;
-            int spacing = payload.optInt("spacing");
-            for (int i = 0; i < items.length(); i++) {
+            if (items == null || items.length() < 3) return null;
+            LinearLayout card = new LinearLayout(context);
+            card.setOrientation(LinearLayout.VERTICAL);
+            android.graphics.drawable.GradientDrawable bg =
+                    new android.graphics.drawable.GradientDrawable();
+            bg.setColor(0xFFFFFFFF);
+            int radius = m(12);                       // 12dp -> 24px
+            bg.setCornerRadii(new float[]{radius, radius, radius, radius,
+                    radius, radius, radius, radius});
+            bg.setStroke(2, 0x14000000);              // 1px 描边
+            card.setBackground(bg);
+            LinearLayout.LayoutParams cardLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            cardLp.leftMargin = m(21);                // 16dp -> 42px
+            cardLp.rightMargin = m(21);
+            card.setLayoutParams(cardLp);
+            card.setPadding(m(21), m(16), m(21), m(16));   // 左右 16dp / 上下 12dp
+
+            // 第 1 行：两列等宽
+            LinearLayout row1 = new LinearLayout(context);
+            row1.setOrientation(LinearLayout.HORIZONTAL);
+            card.addView(row1, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            for (int i = 0; i < 2; i++) {
                 JSONObject item = items.optJSONObject(i);
                 if (item == null) continue;
-                LinearLayout cell = new LinearLayout(context);
-                cell.setOrientation(LinearLayout.HORIZONTAL);
-                cell.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                cell.setPadding(px(context, item.optInt("paddingLeft")), 0,
-                        px(context, item.optInt("paddingRight")), 0);
-                LinearLayout.LayoutParams cellLp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT);
-                if (i > 0 && spacing > 0) cellLp.setMarginStart(px(context, spacing));
-                if (split) { cellLp.width = 0; cellLp.weight = 1f; }
-                cell.setLayoutParams(cellLp);
-                android.graphics.drawable.GradientDrawable background = new android.graphics.drawable.GradientDrawable();
-                background.setColor(0xFFF6F7F8);
-                float radius = px(context, item.optInt("radius"));
-                background.setCornerRadii(new float[]{radius, radius, radius, radius, radius, radius, radius, radius});
-                cell.setBackground(background);
-                // 图标：原版 dx1.l(24.0f)，即 24 设计 px
-                String iconName = AmapToolIcons.tokenOf(item);
-                int iconSize = px(context, 24);
-                if (iconName.length() > 0 && cl != null) {
-                    try {
-                        Object image = cl.loadClass("com.amap.bundle.commonui.designtoken.view.DtImageView")
-                                .getConstructor(Context.class).newInstance(context);
-                        AmapToolIcons.load(cl, (android.widget.ImageView) image, iconName, null, null);
-                        cell.addView((View) image, new LinearLayout.LayoutParams(iconSize, iconSize));
-                    } catch (Throwable ignored) {}
-                }
-                TextView label = new TextView(context);
-                label.setText(item.optString("name"));
-                // 原版用 setTextSize(0, dx1.l(textSize))，单位是 px 不是 sp；
-                // 直接当 sp 会变成巨大的字，把「设置家」拆行后又被裁掉。
-                int designSize = item.optInt("textSize");
-                label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX,
-                        px(context, designSize > 0 ? designSize : 24));
-                label.setTextColor(0xFF323232);
-                label.setSingleLine(true);
-                label.setEllipsize(android.text.TextUtils.TruncateAt.END);
-                LinearLayout.LayoutParams labelLp = new LinearLayout.LayoutParams(
-                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-                labelLp.setMarginStart(px(context, 8));
-                label.setLayoutParams(labelLp);
-                cell.addView(label);
-                final String scheme = item.optString("scheme");
-                cell.setContentDescription(item.optString("name"));
-                if (scheme.length() > 0) cell.setOnClickListener(new View.OnClickListener() {
-                    @Override public void onClick(View v) {
-                        try { context.startActivity(new Intent(Intent.ACTION_VIEW, Uri.parse(scheme))
-                                .setPackage(MainHook.PKG_AMAP).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)); }
-                        catch (Exception e) { H.log("amap_home_chips_action failed=" + e.getClass().getSimpleName()); }
-                    }
-                });
-                row.addView(cell);
+                row1.addView(chipCell(context, item, i, false), new LinearLayout.LayoutParams(
+                        0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
             }
-            return row;
+
+            // 第 2 行：整行「添加常去地点」
+            JSONObject add = items.optJSONObject(2);
+            if (add != null) {
+                LinearLayout row2 = new LinearLayout(context);
+                row2.setOrientation(LinearLayout.HORIZONTAL);
+                LinearLayout.LayoutParams row2Lp = new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+                row2Lp.topMargin = m(13);             // 10dp -> 26px
+                card.addView(row2, row2Lp);
+                row2.addView(chipCell(context, add, 2, true), new LinearLayout.LayoutParams(
+                        ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            }
+            return card;
         } catch (Throwable t) {
-            H.log("amap_home_chips fallback_failed=" + t.getClass().getSimpleName());
+            H.log("event=home_chips_miss reason=chips_draw_failed err=" + t.getClass().getSimpleName());
             return null;
+        }
+    }
+
+    private static View chipCell(Context context, JSONObject item, final int idx, boolean addRow) {
+        LinearLayout cell = new LinearLayout(context);
+        cell.setOrientation(LinearLayout.HORIZONTAL);
+        cell.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        cell.setPadding(m(4), m(4), m(4), m(4));
+        View icon = new ChipGlyph(context, idx);
+        LinearLayout.LayoutParams ilp = new LinearLayout.LayoutParams(m(20), m(20));
+        cell.addView(icon, ilp);
+        TextView label = new TextView(context);
+        label.setText(item.optString("name"));
+        label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, m(20));  // 15sp -> 40px
+        label.setTextColor(addRow ? 0xFF666666 : 0xFF333333);
+        label.setSingleLine(true);
+        LinearLayout.LayoutParams llp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        llp.setMarginStart(m(4));                 // 8px
+        label.setLayoutParams(llp);
+        cell.addView(label);
+        chipLabels.put(label, idx);
+        cell.setClickable(true);
+        cell.setFocusable(true);
+        cell.setContentDescription(item.optString("name"));
+        try {
+            cell.setBackground(new android.graphics.drawable.RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(0x1A000000), null, null));
+        } catch (Throwable ignored) { }
+        final String scheme = item.optString("scheme");
+        cell.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { openChipsScheme(v.getContext(), scheme, idx); }
+        });
+        return cell;
+    }
+
+    /** 读高德自己的状态：SP_KEY_HOME_INFO / SP_KEY_COMPANY_INFO（Lml5;->b()/a()）。 */
+    private static boolean homeSet(ClassLoader cl) {
+        try {
+            Class<?> c = cl.loadClass("ml5");
+            Object v = c.getMethod("b").invoke(null);
+            return v != null && String.valueOf(v).length() > 0;
+        } catch (Throwable t) { return false; }
+    }
+
+    private static boolean companySet(ClassLoader cl) {
+        try {
+            Class<?> c = cl.loadClass("ml5");
+            Object v = c.getMethod("a").invoke(null);
+            return v != null && String.valueOf(v).length() > 0;
+        } catch (Throwable t) { return false; }
+    }
+
+    /** 按当前状态刷新三格文案：设置家→回家、设置单位→去单位。 */
+    private static void applyChipState(ClassLoader cl) {
+        boolean home = homeSet(cl);
+        boolean company = companySet(cl);
+        H.log("event=home_chips_state home=" + home + " company=" + company);
+        for (java.util.Map.Entry<View, Integer> e : chipLabels.entrySet()) {
+            View v = e.getKey();
+            if (!(v instanceof TextView)) continue;
+            int idx = e.getValue() == null ? -1 : e.getValue();
+            String text = idx == 0 ? (home ? "回家" : "设置家")
+                    : idx == 1 ? (company ? "去单位" : "设置单位") : "添加常去地点";
+            ((TextView) v).setText(text);
+        }
+    }
+
+    private static void scheduleChipStateRefresh(final ClassLoader cl) {
+        final android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
+        for (int delay : new int[]{1500, 3000, 6000, 10000}) {
+            h.postDelayed(new Runnable() {
+                @Override public void run() { applyChipState(cl); }
+            }, delay);
+        }
+    }
+
+    /** 原生 tg3.m(F)I 的等价实现：纯 ×2（classes8.dex @0x407908，无 density）。 */
+    private static int m(int v) { return v * 2; }
+
+    private static int parseColor(String value, int fallback) {
+        if (value == null || value.length() == 0) return fallback;
+        try {
+            if (value.charAt(0) == '#') return android.graphics.Color.parseColor(value);
+        } catch (Throwable ignored) { }
+        return fallback;
+    }
+
+    /**
+     * 点开「设置家 / 设置单位 / 常去地点」对应的原生页面。
+     *
+     * <p>原生 {@code ToolboxPanelV2$f.onClick} 的做法是
+     * {@code AMapAppGlobal.getTopActivity().solveScheme(Intent)}；这里优先复刻同一条通路，
+     * 失败再退到 ACTION_VIEW + setPackage（仍由高德自己的 SchemeHandler 接收）。
+     */
+    private static void openChipsScheme(Context context, String scheme, int idx) {
+        if (context == null || scheme == null || scheme.length() == 0) {
+            H.log("event=home_chips_click_fail idx=" + idx + " reason=no_scheme");
+            return;
+        }
+        Intent intent;
+        try {
+            intent = new Intent(Intent.ACTION_VIEW, Uri.parse(scheme));
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        } catch (Throwable t) {
+            H.log("event=home_chips_click_fail idx=" + idx + " reason=bad_scheme");
+            return;
+        }
+        // ① 首选：宿主自己的 solveScheme（与原生 ToolboxPanelV2$f.onClick 完全一致）
+        try {
+            Class<?> global = context.getClassLoader().loadClass("com.autonavi.amap.app.AMapAppGlobal");
+            Object top = global.getMethod("getTopActivity").invoke(null);
+            if (top != null) {
+                java.lang.reflect.Method solve = null;
+                try {
+                    solve = top.getClass().getMethod("solveScheme", Intent.class);
+                } catch (Throwable ignored) {
+                    for (Class<?> itf : top.getClass().getInterfaces()) {
+                        try { solve = itf.getMethod("solveScheme", Intent.class); break; } catch (Throwable ignored2) { }
+                    }
+                }
+                if (solve != null) {
+                    solve.invoke(top, intent);
+                    H.log("event=home_chips_click idx=" + idx + " via=solveScheme scheme=" + scheme);
+                    scheduleChipStateRefresh(context.getClassLoader());
+                    return;
+                }
+            }
+        } catch (Throwable ignored) { }
+        // ② 兜底：标准 ACTION_VIEW，指定高德包名
+        try {
+            context.startActivity(new Intent(intent).setPackage(MainHook.PKG_AMAP));
+            H.log("event=home_chips_click idx=" + idx + " via=startActivity scheme=" + scheme);
+            scheduleChipStateRefresh(context.getClassLoader());
+        } catch (Throwable t) {
+            H.log("event=home_chips_click_fail idx=" + idx + " reason=" + t.getClass().getSimpleName());
+            try {
+                android.widget.Toast.makeText(context, "打开失败", android.widget.Toast.LENGTH_SHORT).show();
+            } catch (Throwable ignored) { }
+        }
+    }
+    /**
+     * 三个线性图标（24×24 网格，1.8dp 描边，圆头圆角），照高德原生风格：
+     * 0 = 房子（设置家）、1 = 楼宇（设置单位）、2 = 加号（常去地点）。
+     */
+    /**
+     * 实心彩色线性图标（用户确认的图2 观感）：
+     * 0 = 金色房子 #F0A020、1 = 蓝色公文包 #4A90E2、2 = 蓝色加号 #4A90E2。
+     * 24 网格绘制，按 View 实际尺寸缩放；不依赖 drawable / 网络，保证一定能看见。
+     */
+    private static final class ChipGlyph extends android.view.View {
+        private final android.graphics.Paint paint =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+        private final android.graphics.Path path = new android.graphics.Path();
+        private final int kind;
+
+        ChipGlyph(Context c, int kind) {
+            super(c);
+            this.kind = kind % 3;
+            paint.setStyle(android.graphics.Paint.Style.FILL);
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            int w = getWidth(), h = getHeight();
+            if (w <= 0 || h <= 0) return;
+            float s = Math.min(w, h) / 24f;
+            path.reset();
+            if (kind == 0) {
+                // 金色房子：屋顶三角 + 墙体，门用白色挖空
+                paint.setColor(0xFFF0A020);
+                path.moveTo(12f * s, 3.5f * s);
+                path.lineTo(21.5f * s, 12f * s);
+                path.lineTo(2.5f * s, 12f * s);
+                path.close();
+                canvas.drawPath(path, paint);
+                canvas.drawRect(5f * s, 11.5f * s, 19f * s, 20.5f * s, paint);
+                paint.setColor(0xFFFFFFFF);
+                canvas.drawRect(10f * s, 15f * s, 14f * s, 20.5f * s, paint);
+            } else if (kind == 1) {
+                // 蓝色公文包：包体 + 提手
+                paint.setColor(0xFF4A90E2);
+                canvas.drawRoundRect(3f * s, 8f * s, 21f * s, 20f * s, 2.2f * s, 2.2f * s, paint);
+                paint.setStyle(android.graphics.Paint.Style.STROKE);
+                paint.setStrokeWidth(1.8f * s);
+                paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+                canvas.drawRoundRect(8.5f * s, 4.5f * s, 15.5f * s, 8f * s, 1.4f * s, 1.4f * s, paint);
+                paint.setStyle(android.graphics.Paint.Style.FILL);
+            } else {
+                // 蓝色加号
+                paint.setColor(0xFF4A90E2);
+                canvas.drawRoundRect(10.2f * s, 4f * s, 13.8f * s, 20f * s, 0.8f * s, 0.8f * s, paint);
+                canvas.drawRoundRect(4f * s, 10.2f * s, 20f * s, 13.8f * s, 0.8f * s, 0.8f * s, paint);
+            }
         }
     }
 
@@ -690,8 +1687,19 @@ public final class AmapNativeHome {
     }
     private static int contentHeight(View self) {
         try {
-            Object p = H.getObjectField(self, "mSplashToolboxPanel");
-            if (!(p instanceof View)) return 0;
+            // The field name differs between builds (17.02 renamed several panel members);
+            // reading only mSplashToolboxPanel silently returned 0 and the panel kept its
+            // default anchor, which is why the upward slide always stopped at the same place.
+            Object p = null;
+            for (String field : new String[]{"mSplashToolboxPanel", "mToolboxPanel", "mQsToolboxPanel",
+                    "mToolBoxPanel", "mPanel"}) {
+                p = H.getObjectField(self, field);
+                if (p instanceof View) break;
+            }
+            if (!(p instanceof View)) {
+                if (Config.debugLog()) H.log("amap_compact_height no_panel_field");
+                return 0;
+            }
             View panel = (View) p;
             int width = self.getWidth() > 0 ? self.getWidth() : self.getResources().getDisplayMetrics().widthPixels;
             panel.measure(View.MeasureSpec.makeMeasureSpec(width, View.MeasureSpec.EXACTLY),
@@ -833,13 +1841,15 @@ public final class AmapNativeHome {
             cell.setMinimumHeight(dp(context, 76));
             View icon = (View) cl.loadClass("com.amap.bundle.commonui.designtoken.view.DtImageView")
                 .getConstructor(Context.class).newInstance(context);
-            String image = item.optString("iconV2", item.optString("imageV2", item.optString("image")));
-            if (image.length() == 0) image = item.optString("icon").split(",")[0];
-            AmapToolIcons.load(cl, (android.widget.ImageView) icon, image, boot, id);
-            cell.addView(icon, new LinearLayout.LayoutParams(dp(context, 38), dp(context, 38)));
+            // 与 toolCell 同一套解析：token 优先、URL 兜底、裸 token 归一。
+            AmapToolIcons.load(cl, (android.widget.ImageView) icon, AmapToolIcons.imageOf(item), boot, id);
+            LinearLayout.LayoutParams iconLp = new LinearLayout.LayoutParams(
+                dp(context, AmapToolCatalog.ICON_DP), dp(context, AmapToolCatalog.ICON_DP));
+            iconLp.bottomMargin = dp(context, AmapToolCatalog.ICON_TEXT_GAP_DP);
+            cell.addView(icon, iconLp);
             TextView label = new TextView(context); label.setText(item.optString("name"));
-            label.setTextSize(12); label.setTextColor(night ? Color.WHITE : Color.rgb(50, 50, 50));
-            label.setGravity(android.view.Gravity.CENTER); label.setMaxLines(2);
+            AmapToolCatalog.styleLabel(label);
+            label.setMaxLines(2);
             cell.addView(label, new LinearLayout.LayoutParams(-1, -2));
             final String schema = item.optString("schema");
             cell.setContentDescription(item.optString("name"));
@@ -1010,9 +2020,28 @@ public final class AmapNativeHome {
         View panel = panelRef == null ? null : panelRef.get();
         ViewGroup container = current.container.get();
         if (!(panel instanceof ViewGroup) || container == null) return;
-        // Only V3 builds its content the way build() reproduces it. On a host whose panel is
-        // V2 the change still applies, but only when the home page is next built.
-        if (!panel.getClass().getName().endsWith("ToolboxPanelV3")) return;
+        String panelClass = panel.getClass().getName();
+        // 17.02 的活面板是 V2：不重建整块内容（会把 AI 卡也重建），只原位增删 chips 行。
+        // 这样开关 ON/OFF 立刻生效，且不碰 buildAICotView / buildAILoadingView 的既有路径。
+        if (panelClass.endsWith("ToolboxPanelV2")) {
+            if (container.getParent() != panel) return;
+            // 工具宫格走 decorateHomeRow 原地重建（原生容器，只切可见性）：
+            // ON/OFF 都立即生效，且工具宫格用同一份 catalogue 重建，不会丢格子。
+            try {
+                decorateHomeRow(container, panel.getClass().getClassLoader(), current.context);
+                // chips 行挂在面板根上（与宿主 init 的 this.addView 一致），单独增删。
+                ensureV2ChipsRow(panel, panel.getClass().getClassLoader(),
+                        current.theme, current.mode, "v2_refresh");
+                H.log("event=home_chips_refresh via=v2_container show="
+                        + Config.visible(Config.K_HOME_CHIPS));
+            } catch (Throwable error) {
+                H.log("event=home_chips_refresh_failed err=" + error.getClass().getSimpleName());
+            }
+            builtSignature = signature();
+            return;
+        }
+        // Only V3 builds its content the way build() reproduces it.
+        if (!panelClass.endsWith("ToolboxPanelV3")) return;
         if (container != ((ViewGroup) panel).getChildAt(0)) return;
         if (!container.isAttachedToWindow()) return;
         if (signature().equals(builtSignature)) return;

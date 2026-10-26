@@ -138,6 +138,12 @@ Loaded native_init(const NativeAPIEntries *entries){
 extern "C" JNIEXPORT void JNICALL
 Java_io_github_ldxm666_mapclean_NativeLabelAssets_configure(JNIEnv *,jclass,jint app,jint mask){
     if(app!=1)return;
+    // Report whether the framework ever called native_init. Without that call there is no
+    // inline-hook primitive, nothing gets installed, and the switch is dead no matter what the
+    // Java side believes -- so the state is logged instead of being hidden behind an
+    // "accepted" that only meant "the request was recorded".
+    bool bound=nativeHooks.bound();
     bool accepted=nativeHooks.request(NativeHost::Amap,[&]{map=1;hidden=mask;});
-    __android_log_print(ANDROID_LOG_INFO,"MapCleanLabels","configure map=%d hide_poi=%d accepted=%d",app,mask!=0,accepted);
+    __android_log_print(ANDROID_LOG_INFO,"MapCleanLabels",
+        "configure map=%d hide_poi=%d accepted=%d framework_bound=%d",app,mask!=0,accepted,bound);
 }

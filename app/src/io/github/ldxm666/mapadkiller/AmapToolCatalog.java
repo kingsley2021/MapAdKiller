@@ -131,6 +131,45 @@ public final class AmapToolCatalog {
         {"86", "更多工具", "其他", "amapuri://ajx?path=path://amap_bundle_toolbox/src/pages/ToolboxHomepage.page.js&style=Page&animation=1", "@Img_icon_aiqs_tool_more_Png"}
     };
     public static final String[] GROUPS = {"出行", "高德精选", "服务", "小程序", "小工具", "其他"};
+
+    // ------------------------------------------------------------------------------------
+    // 工具格子的视觉规格 —— 唯一出处。
+    //
+    // 这些格子是模块自绘的，尺寸/字号/颜色原先散落在 AmapNativeHome 的三处
+    // （tools() / toolCell() / chips()），改一处忘两处就出现「有的格子字大、有的格子字淡」。
+    // 数值取自高德原生工具行，以及注册表 §〇 记录的 2.2.5 实机验证配方：
+    //   文字 13sp / sans-serif-medium / #FF191919 / alpha=1 / 无阴影，
+    //   **不要按系统 uiMode 选白字** —— 工具面板是设计令牌卡片，始终浅色。
+    // ------------------------------------------------------------------------------------
+
+    /** 图标方框边长（dp）。高德原生工具行就是 38dp。 */
+    public static final int ICON_DP = 38;
+    /** 图标底到文字顶的间距（dp）。 */
+    public static final int ICON_TEXT_GAP_DP = 4;
+    /** 工具名字号（sp）与颜色：不透明深灰，浅色面板上的高对比组合。 */
+    public static final int LABEL_SP = 13;
+    public static final int LABEL_COLOR = 0xFF191919;
+    public static final String LABEL_FAMILY = "sans-serif-medium";
+
+    /** 只上颜色/字重/透明度，不动字号 —— 给按载荷设计 px 排字的行（chips）用。 */
+    public static void applyTextPaint(android.widget.TextView label) {
+        label.setTextColor(LABEL_COLOR);
+        label.setTypeface(android.graphics.Typeface.create(LABEL_FAMILY, android.graphics.Typeface.NORMAL));
+        // 父容器若被宿主做了淡出动画，至少保证本 View 自身不叠加任何额外透明度；
+        // 阴影半径 0 等于清除阴影，避免小字号被糊成一团。
+        label.setAlpha(1f);
+        label.setTextScaleX(1f);
+        label.setShadowLayer(0f, 0f, 0f, 0);
+    }
+
+    /** 工具项标签的标准样式。任何新建的工具格标签都必须过这一道。 */
+    public static void styleLabel(android.widget.TextView label) {
+        label.setTextSize(android.util.TypedValue.COMPLEX_UNIT_SP, LABEL_SP);
+        applyTextPaint(label);
+        label.setIncludeFontPadding(false);
+        label.setGravity(android.view.Gravity.CENTER);
+    }
+
     private static final Map<String, String> KEYS;
     static {
         Map<String, String> keys = new LinkedHashMap<String, String>();

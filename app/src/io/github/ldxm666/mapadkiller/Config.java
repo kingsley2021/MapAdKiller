@@ -17,13 +17,48 @@ public final class Config {
     public static final String K_FEED_CONTENT = "feed_content", K_FEED_AI = "feed_ai", K_FEED_FILTER = "feed_filter";
     public static final String K_FEED_BOARD = "feed_board", K_FEED_FESTIVAL = "feed_festival";
     public static final String K_HOME_CHIPS = "home_chips", K_HOME_QUICK_ROW = "home_quick_row";
+    /**
+     * 搜索页「搜索框下方那排彩色金刚位」（美食 / 酒店 / 景点门票 / 加油站 / 休闲玩乐 / 超市）。
+     *
+     * <p>语义：{@code true = 显示}（与 {@link #K_TOOLS_VISIBLE} 同族，不是 {@code *_off} 族）。
+     * 为什么不用 {@code search_grid_off}：面板开关的「开」= 存储值为 true
+     * （{@code PanelTypes.Item} 没有取反能力，参见 {@code K_HOTWORD_OFF} 那一行），
+     * 而这一行的标题是名词「搜索页快捷金刚位」、用户要的是「关掉 = 整排消失」。
+     * 正向键 + {@link #defaultVisible} 兜底为 true ⇒ 老用户升级后这排照旧显示，
+     * 只有主动关掉才消失。
+     */
+    public static final String K_SEARCH_GRID = "search_grid";
     public static final String K_DEBUG_LOG = "debug_log", K_TOOL_SORT = "tool_sort";
+    /** 「工具图标统一彩绘（实验）」：true = 首页工具栏全部用高德自己的彩绘圆底图（默认 false=原生设计）。 */
+    public static final String K_TOOL_COLOR_ICON = "tool_color_icon";
     public static final String K_SEARCH_AD = "search_ad", K_HOTWORD_OFF = "hotword_off", K_RIDE_CARD_OFF = "ride_card_off";
+    /**
+     * 「去哪里打车」卡片（首页工具行下方、天气卡上方那张：蓝色打车图标 + POI 名 +
+     * 「打车享优惠 / 行程有保障」+ 右侧「打车」按钮）。
+     *
+     * <p>语义：{@code true = 显示}（与 {@link #K_TOOLS_VISIBLE} 同族，不是 {@code *_off} 族）。
+     * 默认 **false** ⇒ 不显示，保持老用户升级前的观感（该卡以前被 {@code ride_card_off}
+     * 顺带删掉）。
+     *
+     * <p>⚠ 为什么必须单独成键：这张卡是 {@code main-page-aiqs} 响应里
+     * {@code data.cardList[]} 的 {@code ShareTripTaxiCard} 一项，和顺风车/代驾/抢神券
+     * 同数组；以前 {@code AmapFeed1521} 在 {@code K_FEED_BOARD=false} 时把整个
+     * {@code cardList} 清空 ⇒ 想单独显示打车卡只能把 {@code ride_card_off} 关掉，
+     * 而 {@code AmapNativeHome.COMPACT} 又把它当总闸 ⇒ 整个推荐画布重建，天气/榜单/
+     * 内容流/出行节一起"炸开"。新键只控制这一种 card type。
+     */
+    public static final String K_TAXI_CARD = "taxi_card";
     public static final String K_MY_ORDER_ROW = "my_order_row", K_MY_SERVICE_ROW = "my_service_row", K_MY_TASK = "my_task";
     public static final String K_MY_PROMO_ROW = "my_promo_row", K_MY_GUESS = "my_guess", K_MY_QUALITY = "my_quality";
     public static final String K_MY_FRIENDS = "my_friends";
     public static final String K_MAP_PROMO = "map_promo";
     public static final String K_MAP_POI = "map_poi";
+    /**
+     * 外部导航跳转 URI 归一化（只补缺失参数，绝不覆盖已有值）。默认 true。
+     * 语义：第三方 App 发来的 androidamap:// / amapuri:// 缺 dev/dname/t 时高德会停在首页，
+     * 补参数能把它救回路线页（实现见 AmapProtocolHooks.installNavUriFix）。
+     */
+    public static final String K_NAV_URI_FIX = "nav_uri_fix";
     /**
      * 性能开关：完全**不装** {@code VMapSceneWrapper} 那三个 native 标注 hook。
      *
@@ -53,6 +88,8 @@ public final class Config {
      */
     public static final String K_LABELS_ON = "labels_on";
     public static final String K_PLACE_RECOMMEND = "place_recommend";
+    /** 「自动进入巡航」模块接管（默认 false：老用户行为不变，需在模块面板主动打开）。 */
+    public static final String K_CRUISE_AUTO = "cruise_auto";
     // ── 子进程省电（默认 true = 已拦截；面板里可关掉，用于排查「是不是我拦的」）──────
     // 语义与 K_HOTWORD_OFF 一致：**true 表示"这个行为被关掉"**，不是"显示"。
     // 三个键都落在 defaultVisible 的兜底 `return true` 上，所以默认值天然就是"已拦截"；
@@ -166,6 +203,7 @@ public final class Config {
     static {
         // 工具面板（每个格子都要判一次）
         hot(K_TOOLS_VISIBLE);
+        hot(K_TOOL_COLOR_ICON);
         hot(K_TOOLS_ALLOWLIST);
         // 首页推荐画布（compact() 每次面板重建都判 5 个）
         hot(K_FEED_WEATHER);
@@ -173,6 +211,7 @@ public final class Config {
         hot(K_FEED_CONTENT);
         hot(K_FEED_FESTIVAL);
         hot(K_RIDE_CARD_OFF);
+        hot(K_TAXI_CARD);
         // 地图挂件 / 我的页卡片
         hot(K_MAP_PROMO);
         hot(K_HOME_CHIPS);
@@ -225,8 +264,9 @@ public final class Config {
         return out;
     }
     public static boolean defaultVisible(String key) {
+        if (K_CRUISE_AUTO.equals(key)) return false;
         if (K_DEBUG_LOG.equals(key) || K_TOOLS_ALLOWLIST.equals(key) || K_MAP_POI.equals(key)
-                || K_PLACE_RECOMMEND.equals(key)) return false;
+                || K_TOOL_COLOR_ICON.equals(key) || K_PLACE_RECOMMEND.equals(key)) return false;
         if (key != null && key.startsWith("tool_id_")) return false;
         if (key != null && key.startsWith(K_TOOL_PREFIX))
             return !TOOLS_DEFAULT_OFF.contains(key.substring(K_TOOL_PREFIX.length()));
@@ -240,7 +280,7 @@ public final class Config {
         // who wants the shorter panel.
         return !K_HOME_QUICK_ROW.equals(key) && !K_FEED_BOARD.equals(key) && !K_FEED_FESTIVAL.equals(key)
             && !K_FEED_WEATHER.equals(key) && !K_FEED_CONTENT.equals(key)
-            && !K_MY_FRIENDS.equals(key) && !K_MAP_PROMO.equals(key);
+            && !K_MY_FRIENDS.equals(key) && !K_MAP_PROMO.equals(key) && !K_TAXI_CARD.equals(key);
     }
     public static SharedPreferences prefs() {
         SharedPreferences p = cached;
@@ -350,6 +390,17 @@ public final class Config {
         }
 
         backendForced = false;
+        // 内置版（LSPatch）：remote 走 lspatch-xposed-remote.db，真机实测会
+        // SQLiteCantOpenDatabaseException（旧 uid / 文件锁）⇒ 写入只落到内存，重进就回滚。
+        // 因此内置版一律以宿主自己的 mapclean_cfg 为准；remote 只做镜像（见 CfgStore）。
+        if (CfgStore.embedded()) {
+            if (local != null) {
+                backend = BACKEND_LOCAL;
+                H.log("event=cfg_backend kind=local embedded=true");
+                return local;
+            }
+            H.log("event=cfg_backend kind=none embedded=true reason=no_local_ctx");
+        }
         if (remote != null) {
             backend = BACKEND_REMOTE;
             // 顺手把远程值播种到本地一次：将来远程不可用时配置不会"消失"。
@@ -559,6 +610,12 @@ public final class Config {
 
     /** 写一个布尔键并立即 commit；成功返回 true。 */
     public static boolean put(String key, boolean value) {
+        // 内置版：local 为准 + remote 镜像 + write→read 自校验（见 CfgStore 类注释）
+        if (CfgStore.embedded()) {
+            boolean ok = CfgStore.write(key, value);
+            if (ok) invalidate();
+            return ok;
+        }
         SharedPreferences.Editor e = edit();
         if (e == null) return false;
         boolean ok;
@@ -600,8 +657,12 @@ public final class Config {
         long now = android.os.SystemClock.uptimeMillis();
         if (now >= expiresAt) synchronized (Config.class) {
             if (now >= expiresAt) {
-                try { snapshot = Collections.unmodifiableMap(new HashMap<String, Object>(prefs().getAll())); }
-                catch (Throwable ignored) {}
+                try {
+                    Map<String, Object> merged = CfgStore.embedded()
+                            ? CfgStore.readAll()
+                            : new HashMap<String, Object>(prefs().getAll());
+                    snapshot = Collections.unmodifiableMap(merged);
+                } catch (Throwable ignored) {}
                 expiresAt = now + 2000;
             }
         }
@@ -609,6 +670,21 @@ public final class Config {
     }
     public static boolean visible(String key) { return value(currentValues(), key); }
     public static boolean selected(String key) { return Boolean.TRUE.equals(currentValues().get(key)); }
+
+    /**
+     * 显式设置过则返回其值，否则返回 {@code null}。
+     *
+     * <p>用于「**透传优先**」的判定（工具宫格方案 C）：宿主 payload 里给的工具有什么就显示什么，
+     * 只有用户在模块面板里**显式关掉**的才剔除。没设置过 ⇒ null ⇒ 放行。
+     */
+    public static Boolean explicit(String key) {
+        try {
+            Object v = currentValues().get(key);
+            return v instanceof Boolean ? (Boolean) v : null;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
     /** UI and hooks use the same default when the tool allowlist is active. */
     public static boolean readVisible(SharedPreferences prefs, String key) {
         // prefs 可能是 null（BACKEND_NONE）—— 面板侧绝不能因此崩，退回默认值。
@@ -627,5 +703,20 @@ public final class Config {
     }
     public static boolean toolVisible(String label) { return visible(K_TOOL_PREFIX + label); }
     public static boolean tabVisible(String label) { return visible(K_TAB_PREFIX + label); }
+    /**
+     * 搜索页那排金刚位要不要显示。{@code false} = 用户关掉了它，整排要真删掉并让下方内容上移。
+     *
+     * <p>读取失败一律按“显示”处理：这个开关一旦误判就是“用户的入口凭空消失”，
+     * 比多显示一排糟得多。
+     */
+    public static boolean searchGrid() {
+        try { return visible(K_SEARCH_GRID); } catch (Throwable t) { return true; }
+    }
+    public static boolean cruiseAuto() { try { return visible(K_CRUISE_AUTO); } catch (Throwable t) { return false; } }
+    /** 工具图标统一彩绘（实验）——默认 false，保持高德原生「第一行彩绘 + 第二行线条」。 */
+    public static boolean toolColorIcon() {
+        try { return visible(K_TOOL_COLOR_ICON); } catch (Throwable t) { return false; }
+    }
+
     public static boolean debugLog() { return FORCE_DEBUG || visible(K_DEBUG_LOG); }
 }

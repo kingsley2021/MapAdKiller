@@ -32,11 +32,100 @@ public final class Cfg {
     private static volatile java.util.Map<String, ?> snapshot = java.util.Collections.emptyMap();
     private static volatile long expires;
     private static final SharedPreferences.OnSharedPreferenceChangeListener listener =
-            (p, key) -> expires = 0;
+            (p, key) -> { expires = 0; refreshFlags(); };
     private static volatile long dbgAt;
     private static volatile boolean dbgVal;
 
     private Cfg() {}
+
+    // ══════════════════════════════════════════════════════════════════════════
+    // 省电开关（命名与高德 mapadkiller/Config 对齐）
+    // ══════════════════════════════════════════════════════════════════════════
+    //
+    // 语义统一为「true = 已拦截」。默认 true（读不到配置也按拦截处理）。
+    // 全部走**安装期门控**（见 BaiduPower.install）：关掉 ⇒ 连 hook 都不装 ⇒ 零性能开销。
+    // 代价：改这些开关要**强制停止并重开百度地图**才生效。
+
+    /** 推送长连接安全档：不建连接 + 不处理推送消息。 */
+    public static final String K_PUSH_OFF = "push_off";
+    /** 推送长连接硬档：掐断连接/线程的真实创建链。 */
+    public static final String K_PUSH_HARD_OFF = "push_hard_off";
+    /** 推送服务激进档：通道服务起来即退出。 */
+    public static final String K_PUSH_KILL_OFF = "push_kill_off";
+    /** 后台常驻服务（定位/云控/统计等自启动 Service）。 */
+    public static final String K_BG_SERVICE_OFF = "subproc_off";
+    /** 定时任务（AlarmManager / JobScheduler / WorkManager）。 */
+    public static final String K_TIMER_OFF = "subproc_job_off";
+    /** 桌面小组件刷新。 */
+    public static final String K_WIDGET_OFF = "subproc_widget_off";
+    /** 第三方埋点/统计 SDK。 */
+    public static final String K_TRACK_OFF = "track_off";
+
+    /** 省电键全集（「一键省电」用）。 */
+    public static final String[] POWER_KEYS = {
+            K_PUSH_HARD_OFF, K_PUSH_OFF, K_PUSH_KILL_OFF,
+            K_BG_SERVICE_OFF, K_TIMER_OFF, K_WIDGET_OFF, K_TRACK_OFF
+    };
+
+    // ── 零成本开关：常驻 hook 的拦截器里只读一个 volatile ──────────────────────
+    private static final java.util.List<Flag> FLAGS =
+            new java.util.concurrent.CopyOnWriteArrayList<Flag>();
+
+    /** 一个可被 prefs 变更刷新的布尔开关。 */
+    public abstract static class Flag {
+        private volatile boolean value;
+        private volatile boolean resolved;
+        protected Flag() { FLAGS.add(this); }
+        protected abstract boolean compute();
+        public final boolean on() {
+            if (!resolved) resolve();
+            return value;
+        }
+        public final void resolve() {
+            boolean v;
+            try { v = compute(); } catch (Throwable t) { v = true; }
+            value = v;
+            resolved = true;
+        }
+    }
+
+    public static Flag flag(final String key) {
+        return new Flag() {
+            @Override protected boolean compute() { return Cfg.visible(key); }
+        };
+    }
+
+    private static void refreshFlags() {
+        for (Flag f : FLAGS) f.resolve();
+    }
+
+    /**
+     * 安装期门控：开关关掉时**根本不装**对应 hook（"关闭 = 不加载、不消耗性能"）。
+     * 读不到配置按 true（已拦截）处理。
+     */
+    public static boolean installGate(String key) {
+        try { return visible(key); } catch (Throwable t) { return true; }
+    }
+
+    /**
+     * 「一键省电」：把 {@link #POWER_KEYS} 全部写成 true。
+     *
+     * @return 实际写入的键数；0 = 当前没有可写后端（面板会提示"只读"）
+     */
+    public static int enableAllPower() {
+        SharedPreferences p = prefs();
+        if (p == null) return 0;
+        try {
+            SharedPreferences.Editor e = p.edit();
+            for (String k : POWER_KEYS) e.putBoolean(k, true);
+            if (!e.commit()) return 0;
+            expires = 0;
+            refreshFlags();
+            return POWER_KEYS.length;
+        } catch (Throwable t) {
+            return 0;
+        }
+    }
 
     public static SharedPreferences prefs() {
         SharedPreferences p = cached;

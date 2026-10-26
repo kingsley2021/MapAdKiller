@@ -34,6 +34,8 @@ final class AmapPanel {
                         "关闭后首页不再显示驾车 / 公交等工具入口。"),
                 new PanelTypes.Item(Config.K_TOOLS_ALLOWLIST, "仅显示已开启的工具",
                         "开启后未设置和新增的推广工具一律不进入首页。"),
+                new PanelTypes.Item(Config.K_TOOL_COLOR_ICON, "工具图标统一彩绘（实验）",
+                        "开启后首页工具栏全部使用高德「更多工具」目录里的彩色圆底图标；默认关闭，保持原生「第一行彩绘 + 第二行线条」设计。"),
                 // 「更多工具」 is the app's own fixed cell, so it is not part of the tool
                 // catalogue's groups; keeping it here gives it the one obviously-placed
                 // switch it never had (it used to be buried at the end of 工具 → 其他).
@@ -43,6 +45,12 @@ final class AmapPanel {
                         "控制首页那排回家与公司的快捷入口；改动立即生效。"),
                 new PanelTypes.Item(Config.K_HOTWORD_OFF, "关闭搜索框热词轮播",
                         "把搜索框文字钉死为默认提示词，去掉运营广告词。"),
+                // 搜索页（不是首页）搜索框下方那一排彩色金刚位。关掉后整排真删掉，
+                // 下方内容随之上移；不会留白，也不会只剩页码指示器。
+                new PanelTypes.Item(Config.K_SEARCH_GRID, "搜索页快捷金刚位（实验）",
+                        "搜索框下方那一排彩色入口（美食 / 酒店 / 景点门票 / 加油充电 / 超划算 / 扫街榜 等，随版本变化）。" +
+                        "关掉后整排会消失；但进入搜索页时会先闪现约 0.3 秒再消失，且每次进入都会重演一次，原位还会留一条空白 —— 该排由高德页面运行时绘制、容器高度写死在页面里，模块只能隐藏无法回收空间。如实告知。"),
+                new PanelTypes.Item(Config.K_CRUISE_AUTO, "自动进入巡航（模块接管）", "高德自带开关失效，本项由模块按 15–200km/h 持续 5 秒自动进入巡航。"),
             }, null, POWER_CHIP),
             // 「省电」放在 chip 行**第 2 位**：第 1 位留给默认选中的「首页」，第 2 位保证任何
             // 屏宽都一眼可见。用户两次反馈「模块里没有省电开关入口」—— 藏在第 N 个 chip 里、
@@ -58,8 +66,6 @@ final class AmapPanel {
                 new PanelTypes.Item(Config.K_FEED_BOARD, "扫街榜 / 周边精选榜单"),
                 new PanelTypes.Item(Config.K_FEED_CONTENT, "攻略 / 内容流卡片"),
                 new PanelTypes.Item(Config.K_FEED_FESTIVAL, "出行节 / 促销活动接口"),
-                new PanelTypes.Item(Config.K_RIDE_CARD_OFF, "关闭「去XXX」打车浮窗",
-                        "拦截首页打车运营卡。"),
             }),
             new PanelTypes.Group("地图", new PanelTypes.Item[]{
                 // 真正的实现在原生层：libmapclean_labels.so 改写 map_assets/style_*X_Main
@@ -80,12 +86,15 @@ final class AmapPanel {
                 new PanelTypes.Item(Config.K_MY_FRIENDS, "好友动态"),
             }),
             // 省电 —— 已前移到 chip 行第 2 位（见文件顶部 POWER_CHIP），这里不再重复注册。
+            // 底栏分组：四个标签全部关闭后只剩不可隐藏的「首页」，此时整条底栏整体隐藏。
+            // 这条 note 是必需的 —— 用户看到「底栏消失」时必须知道是自己关出来的，不是坏了。
             new PanelTypes.Group("底栏", new PanelTypes.Item[]{
                 new PanelTypes.Item(Config.K_TAB_PREFIX + "探索", "显示标签「探索」"),
                 new PanelTypes.Item(Config.K_TAB_PREFIX + "长按说话", "显示标签「长按说话」"),
                 new PanelTypes.Item(Config.K_TAB_PREFIX + "打车", "显示标签「打车」"),
                 new PanelTypes.Item(Config.K_TAB_PREFIX + "我的", "显示标签「我的」"),
-            }),
+            }, "四个标签全部关闭时只剩「首页」，此时整条底栏会整体隐藏。"
+                    + "重新打开标签后，被移除的标签需首页重建（退出再进）才回来。"),
             // 「其他」页：`true` = 底部渲染「当前版本 / 检查更新」两行（免 root 内置版没有
             // MainActivity，悬浮面板是它唯一的设置界面，所以版本与更新入口必须在这里）。
             new PanelTypes.Group("其他", othersItems(), null, true),
@@ -558,6 +567,23 @@ final class AmapPanel {
             Log.w(TAG_WRITE, "event=cfg_write_fail key=" + key + " svc=" + svcState(service)
                     + " module=" + moduleState() + " stage=prefs reason=" + reason
                     + " err=" + t.getClass().getSimpleName());
+        }
+        // Third path: the LSPosed remote-preference file itself. getRemotePreferences(group)
+        // in the host is backed by the *module package's* shared_prefs/<group>.xml, so writing
+        // it from the module app is what actually makes a switch visible to 高德 when the
+        // module has no running service channel (the standalone-module case).
+        try {
+            android.content.Context ctx = App.ctx();
+            if (ctx != null && ctx.getSharedPreferences(io.github.ldxm666.mapadkiller.Config.PREF_GROUP,
+                    android.content.Context.MODE_PRIVATE).edit().putBoolean(key, value).commit()) {
+                markWrite(true, null);
+                Log.i(TAG_WRITE, "event=cfg_write_ok key=" + key + " via=module_prefs");
+                apply(key);
+                return true;
+            }
+        } catch (Throwable t) {
+            Log.w(TAG_WRITE, "event=cfg_write_fail key=" + key + " stage=module_prefs err="
+                    + t.getClass().getSimpleName());
         }
         return false;
     }

@@ -286,6 +286,7 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         });
         card.addView(writeWarnRow);
 
+        card.addView(buildDonateRow());
         card.addView(buildDefaultsRow());
 
         // Restore the persisted appearance before the first frame: the card is GONE at this
@@ -310,6 +311,42 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
      *
      * <p>刻意做成一行低调的文字链接而不是按钮：这一页的主角是开关，页脚只是兜底。
      */
+    /**
+     * 内置版没有 MainActivity：2.2.5 的「赞赏支持」入口补在面板底部。
+     * 只做 UI，不动任何已有逻辑；DonateAsset 解码失败时退化为一行文字，绝不崩。
+     */
+    private View buildDonateRow() {
+        LinearLayout wrap = new LinearLayout(context);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(UiKit.dp(context, 20), UiKit.dp(context, 6), UiKit.dp(context, 20), 0);
+
+        final TextView title = new TextView(context);
+        title.setText("赞赏支持");
+        title.setTextSize(13f);
+        title.setTextColor(cTxP());
+        title.setContentDescription("赞赏支持，感谢投喂");
+        title.setPadding(UiKit.dp(context, 4), UiKit.dp(context, 3), UiKit.dp(context, 4), 0);
+        title.setBackground(UiKit.rippleBare(cRipple(), UiKit.dpf(context, 8f)));
+        UiKit.pressable(title, 0.96f);
+        title.setOnClickListener(new OnClickListener() {
+            @Override public void onClick(View v) { showDonate(); }
+        });
+        wrap.addView(title);
+
+        TextView sub = new TextView(context);
+        sub.setText("感谢投喂 · 扫码请作者喝杯咖啡");
+        sub.setTextSize(10.5f);
+        sub.setTextColor(cTxS());
+        sub.setPadding(UiKit.dp(context, 4), 0, UiKit.dp(context, 4), 0);
+        wrap.addView(sub);
+        return wrap;
+    }
+
+    /** 收款码对话框（复用 DonateAsset 的 base64 图，不依赖 R 资源）。 */
+    private void showDonate() {
+        // 统一到 DonateUi，模块版与内置版同一套观感
+        DonateUi.show(context);
+    }
     private View buildDefaultsRow() {
         LinearLayout wrap = new LinearLayout(context);
         wrap.setOrientation(LinearLayout.VERTICAL);
@@ -775,7 +812,7 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
                 color = dark ? 0xFF6BD68A : 0xFF2E7D32;     // green
                 break;
             case U_NEW:
-                text = "v" + Version.NAME;
+                text = "v" + Version.NAME + " → v" + updateLatest;
                 color = dark ? 0xFFFF8A80 : 0xFFD92D20;     // red
                 badge = true;
                 break;
@@ -1153,7 +1190,7 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
             } else if (g.metrics != null) {
                 for (Metric m : g.metrics) body.addView(buildMetricRow(m));
                 body.addView(buildAppearanceResetRow());
-                body.addView(buildFloatOffRow());
+                View offRow = buildFloatOffRow(); if (offRow != null) body.addView(offRow);
             } else if (g.sections != null) {
                 for (Object[] section : g.sections) {
                     Item[] items = (Item[]) section[1];
@@ -1747,6 +1784,10 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
      * 就有 {@code 悬浮窗入口（悬浮球）} 开关，翻回去即恢复。所以这里必须把找回方式写在提示里。
      */
     private View buildFloatOffRow() {
+        // 百度/腾讯内置版**没有长按找回**（MainActivity 被裁掉、也没有 tab 入口），
+        // 一旦关掉就彻底回不来 —— 实测用户已经踩过一次。所以这两个厂商不提供这一行。
+        if (Vendor.baidu() || Vendor.tmap()) return null;
+
         LinearLayout wrap = new LinearLayout(context);
         wrap.setOrientation(LinearLayout.VERTICAL);
         wrap.setPadding(UiKit.dp(context, 20), UiKit.dp(context, 10),
@@ -1950,6 +1991,14 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         open = true;
         openedAt = android.os.SystemClock.uptimeMillis();
         setVisibility(VISIBLE);
+        // 内置版没有 MainActivity：首启「重要提示」原本只在 MainActivity.onCreate 里调用。
+        // 悬浮面板是内置版唯一的设置入口，所以在这里补上唯一一处调用（FirstRunNotice 内部
+        // 全 try/catch，弹窗失败也绝不会拖垮面板）。
+        try {
+            if (context instanceof android.app.Activity) {
+                // 用户要求：去掉每次打开模块的提示弹窗（调用已移除）
+            }
+        } catch (Throwable ignored) { }
         clearSearch();
         // Rebuild the category data so the tool sections reflect switches flipped since the
         // last time the sheet was open (enabled entries sort to the top of each section).

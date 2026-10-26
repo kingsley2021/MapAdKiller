@@ -35,6 +35,8 @@ public final class Pager extends ViewGroup {
 
     /** How far past an edge the content may travel, as a fraction of the page width. */
     private static final float EDGE_RESISTANCE = 0.32f;
+    /** Fraction of the page a drag must cover to commit without a fling (18 %). */
+    private static final float SWIPE_COMMIT = 0.12f;
     /** Settle duration base; longer throws travel for longer. */
     private static final long SETTLE_BASE_MS = 240L;
 
@@ -107,12 +109,13 @@ public final class Pager extends ViewGroup {
             // frame of a swipe (elevation + clipToOutline makes that expensive).
             int want = dist < 1.01f ? View.VISIBLE : View.INVISIBLE;
             if (child.getVisibility() != want) child.setVisibility(want);
-            float alpha = 1f - 0.55f * dist;
-            if (Math.abs(child.getAlpha() - alpha) > 0.004f) child.setAlpha(alpha);
-            float scale = 1f - 0.06f * dist;
-            if (Math.abs(child.getScaleX() - scale) > 0.004f) {
-                child.setScaleX(scale);
-                child.setScaleY(scale);
+            // Pages slide 1:1 with the finger. Earlier builds also scaled and faded the
+            // neighbour every frame, which forced the (elevated, clipped) cards to be
+            // re-rasterised mid-drag and made the swipe feel heavy and laggy.
+            if (child.getAlpha() != 1f) child.setAlpha(1f);
+            if (child.getScaleX() != 1f) {
+                child.setScaleX(1f);
+                child.setScaleY(1f);
             }
             child.setTranslationX(0f);
             child.setRotationY(0f);
@@ -248,13 +251,18 @@ public final class Pager extends ViewGroup {
                 recycleVt();
                 int cur = getScrollX();
                 int target;
+                float travelled = (cur - (float) page * w) / (float) w;   // signed, 0..1
                 if (Math.abs(vx) > minFling) {
                     // Baseline must be the page the drag *started* on (field {@code page},
                     // not updated mid-drag). Rounding the release offset and then adding
                     // +-1 double-counts and skips two pages on a fast half-page flick.
                     target = page + (vx < 0 ? 1 : -1);
+                } else if (travelled > SWIPE_COMMIT) {
+                    target = page + 1;
+                } else if (travelled < -SWIPE_COMMIT) {
+                    target = page - 1;
                 } else {
-                    target = Math.round((float) cur / (float) w);
+                    target = page;
                 }
                 if (target < 0) target = 0;
                 if (target > n - 1) target = n - 1;

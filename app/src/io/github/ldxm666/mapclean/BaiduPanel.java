@@ -31,13 +31,15 @@ final class BaiduPanel {
     /** 百度's catalogue, mapped onto the panel's view model. */
     static PanelTypes.Group[] groups() {
         Spec.Cat[] cats = Spec.cats();
-        // One extra leading group: the 悬浮窗 master switch belongs to FloatingController, not
-        // to 百度's own catalogue (Spec is the single source for the map's switches, and this
-        // key is not one of them). Without it the orb could be switched off but never back on
-        // from inside the sheet.
-        PanelTypes.Group[] out = new PanelTypes.Group[cats.length + 1];
-        out[0] = new PanelTypes.Group("悬浮窗", new PanelTypes.Item[]{
-            });
+        // chip 顺序：悬浮窗 / 省电 / <百度分类…>（与高德一致）。
+        //
+        // ★ 「悬浮窗」组必须存在且**至少一行**：百度内置版把 MainActivity 裁掉了，没有 tab 入口，
+        // 用户一旦关掉悬浮球就再也回不来 —— 上一轮就是因为「组里没有行 ⇒ 白页」而把整组删掉，
+        // 结果变成功能残缺。现在这一组第一行就是开关，并写清「长按底部『我的』标签 1 秒」的
+        // 找回路径（见 {@code mapclean/BaiduMineEntry}），所以不会再出现空组。
+        PanelTypes.Group[] out = new PanelTypes.Group[cats.length + 2];
+        out[0] = floatGroup();
+        out[1] = powerGroup();
         for (int i = 0; i < cats.length; i++) {
             Spec.Cat cat = cats[i];
             PanelTypes.Item[] items = new PanelTypes.Item[cat.rows.length];
@@ -47,9 +49,60 @@ final class BaiduPanel {
             }
             // The category's own subtitle ("改动后重启百度生效" and friends) is shown as the
             // group's note, the same slot the 高德 tool catalogue uses for its 5-cell warning.
-            out[i + 1] = new PanelTypes.Group(cat.title, items, cat.subtitle);
+            out[i + 2] = new PanelTypes.Group(cat.title, items, cat.subtitle);
         }
         return out;
+    }
+
+    /**
+     * 「悬浮窗」组 —— 悬浮球开关 + **找回路径说明**。
+     *
+     * <p>⚠ 这一组**绝不能为空**（{@code Item[]} 长度为 0 会让整页变白，实测踩过）：
+     * 即使以后精简，也必须至少保留「显示悬浮球」这一行。
+     *
+     * <p>为什么放第一组：用户关掉悬浮球后唯一的入口就是这里，而进入这里的方式是
+     * 「长按底部『我的』标签约 1 秒」（{@link BaiduMineEntry}）。把开关和找回说明写在同一行，
+     * 用户一眼就能看懂「关掉之后怎么回来」。
+     */
+    private static PanelTypes.Group floatGroup() {
+        return new PanelTypes.Group("悬浮窗", new PanelTypes.Item[]{
+                new PanelTypes.Item(FloatingConfig.K_FLOAT_ENABLED, "显示悬浮球",
+                        "关掉后悬浮球和这个面板都会消失。要再打开：**长按底部「我的」标签约 1 秒**，"
+                        + "面板会再次弹出，把这一项拨回开即可。")
+        }, "只影响悬浮球本身，不动其它任何开关。");
+    }
+
+    /**
+     * 「省电」组 —— 与高德 {@code AmapPanel.powerSections()} 对齐。
+     *
+     * <p>⚠ **改完必须强制停止并重开百度地图才生效**：这些开关都是**安装期门控**
+     * （{@code Cfg.installGate}），关闭时对应实现根本不装进方法链 —— 这正是用户要的
+     * 「关闭 = 不加载、不消耗性能」，代价就是需要重启宿主。
+     */
+    private static PanelTypes.Group powerGroup() {
+        return new PanelTypes.Group("省电", new PanelTypes.Item[]{
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_PUSH_HARD_OFF, "关闭推送长连接（硬档）",
+                        "省电最明显。代价：百度推送消息（活动/提醒）收不到。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_PUSH_OFF, "关闭推送消息处理",
+                        "不建连接、不处理推送消息，但不杀服务。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_PUSH_KILL_OFF, "关闭推送服务（激进档）",
+                        "通道服务起来即退出。若发现耗电反而上升，先关这一项。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_BG_SERVICE_OFF, "关闭后台常驻服务",
+                        "定位/云控/统计等自启动服务不再常驻。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_TIMER_OFF, "关闭后台周期任务",
+                        "AlarmManager / JobScheduler / WorkManager 的定时唤醒不再重排。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_WIDGET_OFF, "关闭桌面小组件刷新",
+                        "只拦 APPWIDGET_UPDATE，添加/删除组件仍正常。"),
+                new PanelTypes.Item(io.github.ldxm666.bmapclean.Cfg.K_TRACK_OFF, "关闭第三方埋点",
+                        "统计 SDK 不初始化，不上报。"),
+        }, "改动后需**强制停止并重开百度地图**才生效（关闭时彻底不加载对应实现，零性能开销）。",
+                new PanelTypes.Action() {
+                    @Override public String label() { return "一键省电（全部开启拦截）"; }
+                    @Override public int run() {
+                        try { return io.github.ldxm666.bmapclean.Cfg.enableAllPower(); }
+                        catch (Throwable t) { return 0; }
+                    }
+                });
     }
 
     /** True when a writable path is available inside the host process. */

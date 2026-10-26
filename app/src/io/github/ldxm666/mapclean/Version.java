@@ -6,16 +6,19 @@ public final class Version {
     private Version() {}
 
     /** 模块版本：与 module.prop、AndroidManifest 保持一致 */
-    public static final String NAME = "2.2.3";
+    public static final String NAME = "2.2.6";
     /** Full label shown in UI / module manager; the git tag uses the same string. */
-    public static final String LABEL = "2.2.3-step2";
-    public static final int CODE = 2232;
+    public static final String LABEL = "2.2.6";
+    public static final int CODE = 2260;
 
     public static final String REPO = "https://github.com/ldxm666/MapAdKiller";
     public static final String RELEASES = REPO + "/releases/latest";
     public static final String ISSUES = REPO + "/issues";
     /** Telegram 群（来自 MapAdKiller v1.1.0 的「联系作者」） */
-    public static final String TG = "https://t.me/+2rqisPe5tJxjNTk1";
+    /** TG **通知频道**（发版公告 / 重要通知）。 */
+    public static final String TG = "https://t.me/MapAdkillerr";
+    /** TG **聊天群**（反馈 / 交流 / 提问）。 */
+    public static final String TG_CHAT = "https://t.me/MapAdkiller";
 
     /**
      * 「最佳适配应用版本」：本模块的 hook 点是在这些目标版本上真机验证过的。
