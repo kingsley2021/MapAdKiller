@@ -1,7 +1,10 @@
 package io.github.ldxm666.mapclean;
 
 import android.animation.ValueAnimator;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.content.Context;
+import android.content.Intent;
 import android.graphics.Rect;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -190,6 +193,9 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
     private int selected;
     private boolean open;
     private Runnable onClose;
+
+    private boolean capturePrompted;
+    private boolean captureFinished;
 
     public FloatingPanel(Context c, boolean darkTheme) {
         super(c);
@@ -1179,6 +1185,11 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
             renderSearchResults();
         } else {
             Group g = groups[index];
+            // 首次使用：抓取官方下发数据（只在「首页」分组顶部）
+            if ("首页".equals(g.label)) {
+                View capture = buildCaptureBanner();
+                if (capture != null) body.addView(capture);
+            }
             if (g.link != null) {
                 View banner = buildLinkBanner(g.link);
                 if (banner != null) body.addView(banner);
@@ -1496,6 +1507,153 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
      * the power controls are and whether they are still fully on. Pure navigation: it owns no
      * setting of its own.
      */
+    // ─────────────────────────────────── 首次使用：抓取官方下发数据（v2.2.6）
+
+    /** 首页「首次使用」通栏的状态机：红=还没抓，琥珀=抓取中，绿=已抓到待启用。 */
+    private View buildCaptureBanner() {
+        try {
+            final boolean mode = CaptureGate.captureMode(context);
+            final boolean done = CaptureGate.captured(context);
+            if (done && !mode) return null;
+            final String text;
+            final String desc;
+            final int bg;
+            if (mode && done) {
+                text = "✓ 已获取官方数据 · 点这里重启并启用模块 →";
+                desc = "已获取官方数据，点这里重启并启用模块";
+                bg = 0xFF1E8E3E;
+            } else if (mode) {
+                text = "正在抓取官方数据… 请正常用一次地图（首页 / 搜索 / 我的）→";
+                desc = "正在抓取官方数据，请正常使用地图";
+                bg = 0xFFB26A00;
+            } else {
+                text = "⚠ 首次使用必须先抓一次官方数据 · 点这里开始 →";
+                desc = "首次使用必须先抓一次官方数据，点这里开始";
+                bg = 0xFFC62828;
+            }
+            LinearLayout wrap = new LinearLayout(context);
+            wrap.setOrientation(LinearLayout.VERTICAL);
+            wrap.setPadding(UiKit.dp(context, 14), UiKit.dp(context, 8),
+                    UiKit.dp(context, 14), UiKit.dp(context, 2));
+            TextView banner = new TextView(context);
+            banner.setText(text);
+            banner.setTextSize(13f);
+            banner.setTextColor(0xFFFFFFFF);
+            banner.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            banner.setGravity(Gravity.CENTER_VERTICAL);
+            banner.setPadding(UiKit.dp(context, 14), UiKit.dp(context, 11),
+                    UiKit.dp(context, 14), UiKit.dp(context, 11));
+            banner.setBackground(UiKit.plate(bg, UiKit.dpf(context, 14f)));
+            banner.setContentDescription(desc);
+            UiKit.pressable(banner, 0.97f);
+            banner.setOnClickListener(new OnClickListener() {
+                @Override public void onClick(View v) {
+                    onCaptureBanner(mode, done);
+                }
+            });
+            wrap.addView(banner, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+            return wrap;
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private void onCaptureBanner(final boolean mode, final boolean done) {
+        try {
+            if (mode && done) { confirmEnableModule(); return; }
+            if (mode) {
+                new android.app.AlertDialog.Builder(context)
+                        .setTitle("正在抓取官方数据")
+                        .setMessage("现在请像平时那样用一遍地图：打开首页、搜一次、进一次「我的」，"
+                                + "然后回到这里。\n\n抓取在后台自动完成，成功后这条会变成绿色。")
+                        .setPositiveButton("知道了", null)
+                        .show();
+                return;
+            }
+            new android.app.AlertDialog.Builder(context)
+                    .setTitle("先抓一次官方数据")
+                    .setMessage("高德的首页卡片、金刚位、工具宫格都是服务端下发的。"
+                            + "模块第一次必须让高德跑一遍纯官方，把这份数据抓下来，"
+                            + "之后才按你的设置改；否则会出现图标不显示、宫格缺格。\n\n"
+                            + "点「开始」后高德会自动重启一次，期间模块功能全部关闭（悬浮窗保留）。")
+                    .setNegativeButton("取消", null)
+                    .setPositiveButton("开始", new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int w) {
+                            if (!CaptureGate.setCaptureMode(context, true)) {
+                                toast("写入采集标记失败，请检查存储权限");
+                                return;
+                            }
+                            toast("正在重启高德，请稍候…");
+                            restartHost();
+                        }
+                    })
+                    .show();
+        } catch (Throwable t) {
+            toast("操作失败：" + t.getMessage());
+        }
+    }
+
+    private void confirmEnableModule() {
+        try {
+            new android.app.AlertDialog.Builder(context)
+                    .setTitle("启用模块功能？")
+                    .setMessage("官方数据已经抓到了。点「重启」后高德会自动重启，模块功能正式生效。")
+                    .setNegativeButton("稍后", null)
+                    .setPositiveButton("重启", new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int w) {
+                            finishCapture();
+                        }
+                    })
+                    .show();
+        } catch (Throwable t) {
+            finishCapture();
+        }
+    }
+
+    /** 面板一打开就检查：抓到了就直接提示（5 秒不点也自动重启）。 */
+    private void maybeAutoFinishCapture() {
+        if (capturePrompted || captureFinished) return;
+        if (!CaptureGate.captureMode(context) || !CaptureGate.captured(context)) return;
+        capturePrompted = true;
+        try {
+            new android.app.AlertDialog.Builder(context)
+                    .setTitle("✓ 已获取官方数据")
+                    .setMessage("高德下发的官方数据已经抓到。\n\n现在自动重启高德并启用模块功能，"
+                            + "界面会按你的设置生效。")
+                    .setCancelable(false)
+                    .setPositiveButton("立即重启", new android.content.DialogInterface.OnClickListener() {
+                        @Override public void onClick(android.content.DialogInterface d, int w) {
+                            finishCapture();
+                        }
+                    })
+                    .show();
+        } catch (Throwable ignored) { }
+        postDelayed(new Runnable() {
+            @Override public void run() { finishCapture(); }
+        }, 5000L);
+    }
+
+    /** 关掉采集模式 + 重启宿主：下一次启动就是正常的模块模式。 */
+    private void finishCapture() {
+        if (captureFinished) return;
+        captureFinished = true;
+        CaptureGate.setCaptureMode(context, false);
+        toast("正在重启高德…");
+        CaptureGate.restartHost(context);
+    }
+
+    /**
+     * 重启宿主（内置版 = 高德自己）。
+     *
+     * <p>没有 root 就不能 {@code am force-stop}，所以走「先排一个 1.2 秒后的系统闹钟拉起启动页，
+     * 再杀掉自己」：进程死了闹钟还在系统里，起来就是干净的一次启动。
+     */
+    private void restartHost() {
+        // 统一走 CaptureGate：它同时负责关掉采集模式、清掉 restart.pending。
+        CaptureGate.restartHost(context);
+    }
+
     private View buildLinkBanner(final String targetLabel) {
         final int target = indexOfGroup(targetLabel);
         if (target < 0) return null;
@@ -1995,9 +2153,8 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         // 悬浮面板是内置版唯一的设置入口，所以在这里补上唯一一处调用（FirstRunNotice 内部
         // 全 try/catch，弹窗失败也绝不会拖垮面板）。
         try {
-            if (context instanceof android.app.Activity) {
-                // 用户要求：去掉每次打开模块的提示弹窗（调用已移除）
-            }
+            // 采集模式抓到数据后：弹窗提示 + 自动重启并启用模块。
+            maybeAutoFinishCapture();
         } catch (Throwable ignored) { }
         clearSearch();
         // Rebuild the category data so the tool sections reflect switches flipped since the

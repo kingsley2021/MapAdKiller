@@ -82,7 +82,11 @@ public final class Baseline {
     /** 等宿主 Context 的上限（onPackageReady 时 Application 可能还没创建）。 */
     private static final long CONTEXT_WAIT_MS = 20_000L;
     /** 失败重试次数上限：超过就放弃基线（保证模块不会永远 passthrough）。 */
-    private static final int MAX_ATTEMPTS = 3;
+    private static final int MAX_ATTEMPTS = 5;
+    /** 面板「开始抓取」写入的采集模式标记（宿主机 files/baseline/ 下，与 CaptureGate 同名）。 */
+    private static final String F_CAPTURE_MODE = "capture.mode";
+    /** 抓到基线后落的空文件，供面板判断「已就绪」。 */
+    private static final String F_CAPTURE_DONE = "captured.marker";
 
     /** 关键单文件：除了整目录复制，再单独存一份到 {@code <baseline>/<ver>/key/}。 */
     private static final String[] KEY_FILES = {
@@ -139,6 +143,21 @@ public final class Baseline {
                 sCapturing = false;
                 return false;
             }
+            // 面板「开始抓取官方数据」写入的显式采集模式（files/baseline/capture.mode）：
+            // 用户主动点了就一直抓到成功为止，不受 attempt 次数限制。
+            final File modeFile = captureModeFile();
+            if (!captured && modeFile != null && modeFile.isFile()) {
+                if (isMainProcess()) {
+                    state.setProperty(K_ATTEMPTS + code, "0");
+                    saveState(state);
+                    startWorker(version, code, recaptureAt);
+                }
+                sCapturing = true;
+                H.log(Log.INFO, TAG, "event=baseline_mode on reason=user_capture version=" + version
+                        + " code=" + code + " process=" + processName());
+                return true;
+            }
+
             // 子进程一律跟随主进程：没基线就一起透传（否则主进程纯官方、子进程却挂了 hook）。
             // 子进程不写 .attempt、也不做 force_release 判定，避免把主进程「本次启动刚写」的标记
             // 误判成「上次已 passthrough」。
@@ -147,14 +166,13 @@ public final class Baseline {
                 H.log(Log.INFO, TAG, "event=baseline_passthrough process=" + processName() + " mode=subprocess");
                 return true;
             }
-            // 硬要求：passthrough 最多只允许一次。第二次启动无论上次抓没抓到都必须放行 hook，
-            // 否则一个写标记失败就能把整个模块永久锁死（v2.2.5 首版真机踩过）。
+            // v2.2.6：删掉「passthrough 只允许一次」的强制放行 —— 真机上第二次启动就带着空基线
+            // 把 hook 全装上，工具宫格图标整片不显示。现在**没抓到基线就一直跑纯官方**，
+            // 安全阀只剩 MAX_ATTEMPTS 次上限（抓不到才放行，绝不会把模块永久锁死）。
             final File attemptMark = attemptFile(code);
             if (!captured && attemptMark != null && attemptMark.isFile()) {
-                H.log(Log.WARN, TAG, "event=baseline_skip reason=force_release v=" + version
-                        + " code=" + code + " (passthrough allowed only once)");
-                sCapturing = false;
-                return false;
+                H.log(Log.INFO, TAG, "event=baseline_passthrough reason=retry v=" + version
+                        + " code=" + code);
             }
             if (!captured && "true".equals(state.getProperty(K_GAVE_UP + code))) {
                 H.log(Log.INFO, TAG, "event=baseline_skip reason=give_up v=" + version + " code=" + code);
@@ -348,6 +366,20 @@ public final class Baseline {
             p.remove(K_FAILED + code);
             p.setProperty(K_RECAPTURE_HANDLED, String.valueOf(recaptureAt));
             saveState(p);
+            // 面板靠这个空文件判断「已抓到」——写失败不影响抓取本身。
+            // restart.pending 让冷启动这一次（hook 还没生效的会话）弹窗提示并自动重启，
+            // 用户不用自己再手动杀一次进程。
+            try {
+                File done = captureDoneFile();
+                if (done != null && (done.isFile() || done.createNewFile())) {
+                    done.setLastModified(System.currentTimeMillis());
+                }
+                File dir = stateDir();
+                if (dir != null) {
+                    File pending = new File(dir, "restart.pending");
+                    if (!pending.isFile()) pending.createNewFile();
+                }
+            } catch (Throwable ignored) { }
             // 尽力镜像到 RemotePreferences（只读实现会抛，忽略即可）
             try {
                 SharedPreferences rp = remotePrefs();
@@ -571,6 +603,18 @@ public final class Baseline {
     private static File attemptFile(int code) {
         File dir = stateDir();
         return dir == null ? null : new File(dir, ".attempt_v" + code);
+    }
+
+    /** 采集模式标记文件：{@code files/baseline/capture.mode}（面板写，这里只读）。 */
+    private static File captureModeFile() {
+        File dir = stateDir();
+        return dir == null ? null : new File(dir, F_CAPTURE_MODE);
+    }
+
+    /** 基线已就绪标记：{@code files/baseline/captured.marker}（这里写，面板只读）。 */
+    private static File captureDoneFile() {
+        File dir = stateDir();
+        return dir == null ? null : new File(dir, F_CAPTURE_DONE);
     }
 
     /** 同步写一个「已 passthrough 过一次」的小标记（失败也无所谓，内存标志仍在）。 */

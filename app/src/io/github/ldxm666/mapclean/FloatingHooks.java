@@ -154,6 +154,8 @@ public final class FloatingHooks {
                     if (!accept(activity, hostPackage)) return;
                     attachWhenVisible(activity);
                     FloatingController.refreshTheme(activity);
+                    // 首次安装的「抓取官方数据」：抓到就弹窗提示并自动重启一次。
+                    try { CaptureGate.tick(activity); } catch (Throwable ignored) { }
                 }
 
                 @Override public void onActivityPaused(Activity activity) { }
