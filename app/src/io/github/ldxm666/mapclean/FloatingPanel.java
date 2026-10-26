@@ -1611,29 +1611,6 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         }
     }
 
-    /** 面板一打开就检查：抓到了就直接提示（5 秒不点也自动重启）。 */
-    private void maybeAutoFinishCapture() {
-        if (capturePrompted || captureFinished) return;
-        if (!CaptureGate.captureMode(context) || !CaptureGate.captured(context)) return;
-        capturePrompted = true;
-        try {
-            new android.app.AlertDialog.Builder(context)
-                    .setTitle("✓ 已获取官方数据")
-                    .setMessage("高德下发的官方数据已经抓到。\n\n现在自动重启高德并启用模块功能，"
-                            + "界面会按你的设置生效。")
-                    .setCancelable(false)
-                    .setPositiveButton("立即重启", new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(android.content.DialogInterface d, int w) {
-                            finishCapture();
-                        }
-                    })
-                    .show();
-        } catch (Throwable ignored) { }
-        postDelayed(new Runnable() {
-            @Override public void run() { finishCapture(); }
-        }, 5000L);
-    }
-
     /** 关掉采集模式 + 重启宿主：下一次启动就是正常的模块模式。 */
     private void finishCapture() {
         if (captureFinished) return;
@@ -2152,10 +2129,8 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         // 内置版没有 MainActivity：首启「重要提示」原本只在 MainActivity.onCreate 里调用。
         // 悬浮面板是内置版唯一的设置入口，所以在这里补上唯一一处调用（FirstRunNotice 内部
         // 全 try/catch，弹窗失败也绝不会拖垮面板）。
-        try {
-            // 采集模式抓到数据后：弹窗提示 + 自动重启并启用模块。
-            maybeAutoFinishCapture();
-        } catch (Throwable ignored) { }
+        // 采集模式抓到数据后的「✓ 已获取官方数据」弹窗 + 自动重启由 CaptureGate.tick() 统一负责
+        // （它在 onActivityResumed 里轮询 restart.pending），这里不再重复弹一次。
         clearSearch();
         // Rebuild the category data so the tool sections reflect switches flipped since the
         // last time the sheet was open (enabled entries sort to the top of each section).

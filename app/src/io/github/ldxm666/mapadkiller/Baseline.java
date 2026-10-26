@@ -76,7 +76,12 @@ public final class Baseline {
     private static final String STATE_FILE = "state.properties";
 
     /** 首页稳定兜底：进程启动后最多等这么久就无条件抓。 */
-    private static final long FALLBACK_MS = 25_000L;
+    private static final long FALLBACK_MS = 90_000L;
+    /**
+     * 兜底抓取的文件数下限：真实家用机的 shared_prefs 有上百个文件，个位数说明这次启动要么闪退、
+     * 要么还没写出配置。这种半成品不能当「已抓到」——否则首启一次闪退就把官方数据永久写坏了。
+     */
+    private static final int MIN_FILES = 20;
     /** 检测到 main_page.xml 本次启动被写过之后，再等这么久让同批 prefs 落盘。 */
     private static final long SETTLE_MS = 5_000L;
     /** 等宿主 Context 的上限（onPackageReady 时 Application 可能还没创建）。 */
@@ -259,6 +264,15 @@ public final class Baseline {
         }
 
         int files = capture(ctx, version, code, prefsDir, fallback);
+        if (fallback && files < MIN_FILES) {
+            // 首启闪退/极慢时 shared_prefs 还是空的：删掉半成品、不写 captured 标记，下次启动重来。
+            try {
+                deleteRecursively(new File(new File(ctx.getFilesDir(), DIR), version));
+            } catch (Throwable ignored) { }
+            H.log(Log.WARN, TAG, "event=baseline_capture_retry files=" + files
+                    + " reason=fallback_thin version=" + version);
+            return;
+        }
         markCaptured(version, code, files, fallback, recaptureAt);
         H.log(Log.INFO, TAG, "event=baseline_capture_done files=" + files
                 + " version=" + version + " mode=" + (fallback ? "fallback" : "home")
