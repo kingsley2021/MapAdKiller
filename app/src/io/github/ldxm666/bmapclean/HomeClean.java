@@ -736,12 +736,21 @@ public final class HomeClean {
         // 开关语义是"显示"，默认开 —— 所以只有用户主动关掉才会去动它。
         if (Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ)) return 0;
         try {
+            // ① 先按资源 id。这排是 Talos（Yoga 自绘）渲染，文本不进 View 树 ⇒
+            //    下面那套「文案命中 ≥3 个」的启发式在真机上永远命中 0 个，
+            //    开关关掉也没反应。id 名从 22.0.0 到 22.1.0 一直没变，按 id 才落地。
+            int byId = BaiduHooks.hideSearchLine2(decor);
+            if (byId > 0) {
+                if (Cfg.debug()) Cfg.log("search chips hidden by id n=" + byId);
+                return byId;
+            }
+            // ② 文案兜底（旧路径）—— 只在 id 被改名时才会走到这里。
             View row = findAnchorContainer(decor, SEARCH_CHIP_WORDS, 0, 140);
             if (row == null) return 0;
             java.util.List<ViewGroup> dirty = new java.util.ArrayList<ViewGroup>();
             if (!collapse(row, dirty)) return 0;
             for (int i = 0; i < dirty.size(); i++) restackColumn(dirty.get(i));
-            if (Cfg.debug()) Cfg.log("search chips hidden " + row.getClass().getSimpleName());
+            if (Cfg.debug()) Cfg.log("search chips hidden by text " + row.getClass().getSimpleName());
             return 1;
         } catch (Throwable t) {
             return 0;

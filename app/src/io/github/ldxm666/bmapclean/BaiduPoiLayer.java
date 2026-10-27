@@ -19,7 +19,7 @@ import java.util.TreeMap;
  * file opens. SDK configuration/resource roots and all original files stay intact.
  */
 final class BaiduPoiLayer {
-    private static final String SCHEMA="poi-file-assets-v8";
+    private static final String SCHEMA="poi-file-assets-v9";
     private static final String[] STYLES={"map.sty","traffic.sty","weakmap.sty","reduct.sty","weaktraffic.sty","weakreduct.sty"};
     private static String cachedKey;
     private static File cachedDirectory;
@@ -28,12 +28,13 @@ final class BaiduPoiLayer {
     static void install(ClassLoader cl) {
         BaiduHooks.hook(H.cls(cl,"com.baidu.platform.comjni.map.basemap.AppBaseMap"),"initWithOptions",chain -> {
             Bundle options=(Bundle)chain.getArg(0);
-            boolean hide=!Cfg.visible(Spec.K_MAP_POI,Spec.defaultVisible(Spec.K_MAP_POI));
+            java.util.Set<String> hidden=hiddenCategories();
+            boolean hide=!hidden.isEmpty();
             boolean prepared=false;
             if (hide && options!=null) try {
                 Application app=(Application)Class.forName("android.app.ActivityThread")
                         .getMethod("currentApplication").invoke(null);
-                if (app!=null) prepared=prepare(options,app);
+                if (app!=null) prepared=prepare(options,app,hidden);
             } catch (Throwable error) {
                 disable();
                 if (!failedLogged) {
@@ -42,18 +43,38 @@ final class BaiduPoiLayer {
                 }
             }
             if (!hide || !prepared) disable();
-            H.log("poi_style policy="+(hide?"hidden":"visible")+" original_bundle=true file_mapping="+prepared);
+            H.log("poi_style policy="+(hide?"hidden":"visible")+" categories="+hidden.size()
+                    +"/"+(BaiduLabelSettings.CATS.length+1)+" original_bundle=true file_mapping="+prepared);
             // The original Bundle, including every SDK root, is always passed once.
             Object result=chain.proceed();
             H.log("poi_style initialized="+Boolean.TRUE.equals(result)+" redirected=false file_mapping="+prepared);
             return result;
         },Bundle.class,boolean.class);
     }
+    /**
+     * 当前要隐藏哪几类。
+     *
+     * <p>开关语义与其它页一致：prefs 里存的是「显示」，所以 {@code visible==false} = 隐藏。
+     * 总开关 {@link Spec#K_MAP_POI} 关着 ⇒ 返回全集（等价 2.2.6 的一刀切）。
+     * 总开关开着 ⇒ 逐类读；一类都没关 ⇒ 返回空集，调用方据此完全不装文件映射（零开销）。
+     */
+    private static java.util.Set<String> hiddenCategories() {
+        java.util.Set<String> all=new java.util.HashSet<String>();
+        for (BaiduLabelSettings.Cat c:BaiduLabelSettings.CATS) all.add(c.key);
+        all.add(BaiduLabelSettings.KEY_OTHER);
+        if (!Cfg.visible(Spec.K_MAP_POI,Spec.defaultVisible(Spec.K_MAP_POI))) return all;
+        java.util.Set<String> out=new java.util.HashSet<String>();
+        for (BaiduLabelSettings.Cat c:BaiduLabelSettings.CATS) {
+            if (!Cfg.visible(c.key,false)) out.add(c.key);
+        }
+        if (!Cfg.visible(BaiduLabelSettings.KEY_OTHER,false)) out.add(BaiduLabelSettings.KEY_OTHER);
+        return out;
+    }
     private static void disable() {
         if (nativePrepared) io.github.ldxm666.mapclean.NativeLabelAssets.prepareBaidu(new String[0],new String[0]);
         nativePrepared=false;
     }
-    private static synchronized boolean prepare(Bundle options,Application app) throws Exception {
+    private static synchronized boolean prepare(Bundle options,Application app,java.util.Set<String> hidden) throws Exception {
         String cfg=options.getString("cfgdataroot");
         if (cfg==null) { disable(); return false; }
         File source=new File(cfg).getCanonicalFile();
@@ -71,7 +92,7 @@ final class BaiduPoiLayer {
             }
         }
         if (!main || styles.size()>128) throw new java.io.IOException("Unsupported cfg style set");
-        String key=sourceKey(styles);
+        String key=sourceKey(styles,hidden);
         File base=new File(app.getCodeCacheDir(),"mcpoi").getCanonicalFile();
         mkdir(base);
         File output=new File(base,key.substring(0,32));
@@ -82,7 +103,7 @@ final class BaiduPoiLayer {
                 disable();
                 List<byte[]> data=new ArrayList<byte[]>(); int rules=0, drawings=0;
                 for (File style:styles) {
-                    BaiduLabelStyle.Result result=BaiduLabelStyle.hideAll(read(style));
+                    BaiduLabelStyle.Result result=BaiduLabelStyle.filterByCategories(read(style),hidden);
                     data.add(result.bytes); rules+=result.features; drawings+=result.drawings;
                 }
                 if (drawings==0) throw new java.io.IOException("No native point drawings");
@@ -92,7 +113,7 @@ final class BaiduPoiLayer {
                     File destination=new File(temporary,relative(styles.get(i)));
                     mkdir(destination.getParentFile()); write(destination,data.get(i));
                 }
-                if (!key.equals(sourceKey(styles))) throw new java.io.IOException("Source STY changed during preparation");
+                if (!key.equals(sourceKey(styles,hidden))) throw new java.io.IOException("Source STY changed during preparation");
                 write(new File(temporary,".complete"),(SCHEMA+"\n"+key+"\n"+styles.size()+"\n"+rules+"\n"+drawings).getBytes(StandardCharsets.UTF_8));
                 if (!temporary.renameTo(output) && !complete(output,key,styles)) throw new java.io.IOException("Cannot publish STY cache");
             }
@@ -102,7 +123,7 @@ final class BaiduPoiLayer {
             cachedKey=key; cachedDirectory=output;
             H.log("poi_style prepared themes="+styles.size()+" features="+cachedRules+" drawings="+cachedDrawings);
         }
-        if (!key.equals(sourceKey(styles))) throw new java.io.IOException("Source STY changed before initialization");
+        if (!key.equals(sourceKey(styles,hidden))) throw new java.io.IOException("Source STY changed before initialization");
         Map<String,String> paths=new TreeMap<String,String>();
         String resources=options.getString("stylerespath");
         for (File style:styles) {
@@ -144,8 +165,18 @@ final class BaiduPoiLayer {
         if (!marker.isFile() || marker.length()>256) throw new java.io.IOException("Invalid STY manifest");
         return new String(read(marker),StandardCharsets.UTF_8).split("\n");
     }
-    private static String sourceKey(List<File> styles) throws Exception {
+    /**
+     * 缓存键 = SCHEMA + 每个源 STY 的 路径/大小/mtime + **当前隐藏的分类集合**。
+     *
+     * <p>最后一项是 2.2.7 补的。以前键里只有源文件，于是「改了开关」和「没改」算出来的键
+     * 一模一样，直接复用旧缓存 —— 表现就是「开关拨了没反应」。分类按名字排序后参与摘要，
+     * 集合不变则键不变，变了必然重建。
+     */
+    private static String sourceKey(List<File> styles,java.util.Set<String> hidden) throws Exception {
         MessageDigest digest=MessageDigest.getInstance("SHA-256"); fingerprint(digest,SCHEMA);
+        java.util.List<String> cats=new java.util.ArrayList<String>(hidden);
+        java.util.Collections.sort(cats);
+        for (String cat:cats) fingerprint(digest,"cat="+cat);
         for (File style:styles) fingerprint(digest,style.getCanonicalPath()+":"+style.length()+":"+style.lastModified());
         StringBuilder out=new StringBuilder(); char[] hex="0123456789abcdef".toCharArray();
         for(byte b:digest.digest()){out.append(hex[(b&255)>>>4]);out.append(hex[b&15]);}return out.toString();

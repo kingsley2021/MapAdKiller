@@ -31,8 +31,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 ROOT = Path(__file__).resolve().parent.parent
 
 ROOT_FILES = {".gitignore", "README.md", "LICENSE", "CHANGELOG.md"}
-APP_FILES = {"app/AndroidManifest.xml", "app/build.ps1"}
-SOURCE_TREES = {"app/src", "app/stub-src", "app/res", "app/META-INF", "app/native", "docs", "registry-pack"}
+APP_FILES = {"app/AndroidManifest.xml", "app/build.ps1",
+             "src/AndroidManifest.xml", "src/build.ps1"}
+SOURCE_TREES = {"app/src", "app/stub-src", "app/res", "app/META-INF", "app/native",
+                "src/src", "src/stub-src", "src/res", "src/META-INF", "src/native",
+                "docs", "registry-pack"}
 EXCLUDED_PARTS = {".git", ".codex", ".agents", ".aws", "__pycache__", ".idea", ".vscode",
                   "evidence", "shots", ".scratch", "build", "dist", "output"}
 EXCLUDED_SUFFIXES = {".apk", ".zip", ".keystore", ".jks", ".p12", ".log", ".db", ".sqlite",
@@ -146,10 +149,13 @@ def _aliases(text):
 def extract_hooks(source):
     """Every hook registration in the module sources, with owner file and line."""
     rows = []
+    folders = []
     for base in ("mapadkiller", "mapclean"):
-        folder = source / "app" / "src" / "io" / "github" / "ldxm666" / base
-        if not folder.is_dir():
-            continue
+        for layout in ("app/src", "src/src"):
+            folder = source / layout / "io" / "github" / "ldxm666" / base
+            if folder.is_dir():
+                folders.append((base, folder))
+    for base, folder in folders:
         for path in sorted(folder.glob("*.java")):
             text = path.read_text(encoding="utf-8", errors="replace")
             aliases = _aliases(text)

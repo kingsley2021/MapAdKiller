@@ -69,9 +69,21 @@ final class BaiduSdkBlock {
     private static final String BMAD = "com.baidu.baidumaps.ad.";
 
     /**
-     * 各版本实证过的 loader 完整类名（22.0.0 / 22.0.40 / 22.0.50 三代交叉核对）。
+     * 各版本实证过的 loader 完整类名（22.0.0 / 22.0.40 / 22.0.50 / **22.1.0** 四代交叉核对）。
      *
-     * <p>前 10 个三代都在；22.0.50 多出的那批交给 {@link #discover} 运行时找。
+     * <p><b>22.1.0 变化（18 dex / 141,023 类全表核对）：</b>
+     * {@code commonadprovider} 从 308 个类、20 个子包，ADN 集合与 22.0.50 **完全一致**，
+     * {@code AdType} 枚举一个都没加 —— 但 {@code recommend.RecommendAdLoader2}
+     * **整个类没了**（只剩 {@code RecommendAdLoader1}）。留着它只会每次多记一次
+     * miss，已删除。实测 {@code loaders observed=15 of 16} 就是这么来的。
+     *
+     * <p>真正新增的攻击面在**另一个引擎**：{@code com.baidu.baidumaps.ad.*}（246 个类），
+     * 它有自己的 {@code BMapAdEngine} / {@code IBMapAdLoader}，40+ 个具体 loader 叫
+     * {@code OctopusSplashLoader} / {@code CsjInterstitialLoader} / {@code UbixRewardLoader}
+     * 这种 —— **没有一个以 {@code AdLoader} 结尾**，按名字枚举完全抓不到。
+     * 那一层靠 {@link #blockBmadProviders} 在 {@code BMAd*Provider} 的
+     * {@code c(Context, *SplashAdConfig, *)} / {@code d(*, ViewGroup, *)} 入口上断源，
+     * 22.1.0 签名逐参数不变（反编译实证，见下）。
      */
     private static final String[] KNOWN = {
             ROOT + ".api.IAdLoader",
@@ -82,7 +94,6 @@ final class BaiduSdkBlock {
             ROOT + ".qumeng.QumengAdLoader",
             ROOT + ".qumeng.QumengCacheAdLoader",
             ROOT + ".recommend.RecommendAdLoader1",
-            ROOT + ".recommend.RecommendAdLoader2",
             ROOT + ".recommend.third.ApiAdLoader",
             ROOT + ".ruishi.RuishiAdLoader",
             ROOT + ".taku.TakuAdLoader",
@@ -90,6 +101,34 @@ final class BaiduSdkBlock {
             ROOT + ".ubix.UbixCacheAdLoader",
             ROOT + ".wangmai.WangmaiAdLoader",
             ROOT + ".ylh.YlhAdLoader",
+    };
+
+    /**
+     * 老引擎之外、22.1.0 实证存在且**绕过 {@code commonadprovider}** 的 loader。
+     *
+     * <p>这些只做 {@code observe}（原样放行 + 首条日志），不 VOID ——
+     * 它们的回调语义没有逐个反编译确认过，吞掉有卡开屏的风险。
+     * 作用是把「这一层被调用过」记进日志，方便下次百度改版时知道哪条链还活着。
+     */
+    private static final String[] EXTRA = {
+            BMAD + "api.IBMapAdLoader",
+            BMAD + "BMAdSplashProvider",
+            BMAD + "BMAdNativeProvider",
+            BMAD + "BMAdRewardProvider",
+            "com.baidu.baidumaps.tasksplash.TaskSplashAdLoader",
+            "com.baidu.baidumaps.tasksplash.bmap.BMapTaskSplashAdLoader",
+            "com.baidu.baidumaps.tasksplash.gromore.GromoreTaskSplashAdLoader",
+            "com.baidu.baidumaps.taskweb.CustomBMapAdLoader",
+            "com.baidu.baidumaps.mobads.interstitial.GromoreInterstitialAdLoader",
+            "com.baidu.baidumaps.operation.popad.PopAdLoader",
+    };
+
+    /** 新引擎的包前缀：这些包下的 {@code *Loader} 按名字收进来观察。 */
+    private static final String[] NEW_ENGINE_PREFIXES = {
+            BMAD,
+            "com.baidu.baidumaps.tasksplash.",
+            "com.baidu.baidumaps.taskweb.",
+            "com.baidu.baidumaps.operation.popad.",
     };
 
     /**
@@ -116,7 +155,8 @@ final class BaiduSdkBlock {
             if (c == null) continue;
             if (observeCallbacks(c, names.get(i)) > 0) hooked++;
         }
-        H.log("baidu_adn loaders observed=" + hooked + " of " + names.size());
+        H.log("baidu_adn loaders observed=" + hooked + " of " + names.size()
+                + " (known=" + KNOWN.length + " extra=" + EXTRA.length + ")");
         return hooked;
     }
 
@@ -163,6 +203,9 @@ final class BaiduSdkBlock {
         for (int i = 0; i < KNOWN.length; i++) {
             if (!out.contains(KNOWN[i])) out.add(KNOWN[i]);
         }
+        for (int i = 0; i < EXTRA.length; i++) {
+            if (!out.contains(EXTRA[i])) out.add(EXTRA[i]);
+        }
         List<String> found = discover(cl);       // 只枚举一次
         for (int i = 0; i < found.size(); i++) {
             if (!out.contains(found.get(i))) out.add(found.get(i));
@@ -185,6 +228,19 @@ final class BaiduSdkBlock {
                 boolean byApi = api != null && !name.equals(ROOT + ".api.IAdLoader")
                         && api.isAssignableFrom(k);
                 if (byName || byApi) out.add(name);
+            }
+            // 新引擎（22.1.0 起）：类名是 *SplashLoader / *InterstitialLoader / *RewardLoader…
+            // 一律以 Loader 结尾，但**不以 AdLoader 结尾**，上面那条腿抓不到。
+            for (int i = 0; i < loaded.size(); i++) {
+                Class<?> k = loaded.get(i);
+                String name = k.getName();
+                if (name == null || name.indexOf('$') >= 0) continue;
+                if (!name.endsWith("Loader")) continue;
+                boolean inNewEngine = false;
+                for (int p = 0; p < NEW_ENGINE_PREFIXES.length; p++) {
+                    if (name.startsWith(NEW_ENGINE_PREFIXES[p])) { inNewEngine = true; break; }
+                }
+                if (inNewEngine && !out.contains(name)) out.add(name);
             }
         } catch (Throwable ignored) {
             // 发现失败不是错误：KNOWN 名单仍然生效。

@@ -586,6 +586,77 @@ public final class AmapNativeHome {
     /** 已处理过的宫格（面板重建会反复走 decorateHomeRow，用它去重，避免行距越加越大）。 */
     private static final java.util.WeakHashMap<View, Boolean> RELAXED_GRIDS = new java.util.WeakHashMap<View, Boolean>();
 
+    /** 我们为「首页工具宫格」开关亲手隐藏过的子 View（只恢复自己改过的，不碰宿主状态）。 */
+    private static final java.util.WeakHashMap<View, Boolean> GRID_HIDDEN =
+            new java.util.WeakHashMap<View, Boolean>();
+
+    /** chips 行的文字特征：宿主原生那排「设置家 / 设置单位 / 常去地点」。 */
+    private static final String[] CHIP_TEXTS = {
+            "设置家", "回家", "设置单位", "去单位", "常去地点", "添加常去地点", "公司"};
+
+    private static boolean hasChipsText(View view, int depth) {
+        if (view == null || depth > 4) return false;
+        if (view instanceof android.widget.TextView) {
+            CharSequence cs = ((android.widget.TextView) view).getText();
+            String text = cs == null ? "" : cs.toString().trim();
+            for (String chip : CHIP_TEXTS) {
+                if (text.equals(chip) || text.startsWith(chip)) return true;
+            }
+            return false;
+        }
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (hasChipsText(group.getChildAt(i), depth + 1)) return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean isChipsRow(View view) {
+        try {
+            if (view == null) return false;
+            if (chipsRows.contains(view)) return true;
+            return view.getClass().getName().contains("HorizontalScrollView") && hasChipsText(view, 0);
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /**
+     * 「首页工具宫格」开关：只隐藏宫格自己，**绝不隐藏承载 chips 的容器**。
+     *
+     * <p>真机复现（17.02 / 2260）：关掉 {@code ui_tools_visible} 之后
+     * {@code home_chips_show items=4} 明明建出来了，首页却看不到「回家 / 去单位」——
+     * 因为那排 chips 是宿主在 {@code toolbox.a.a} 返回的同一个容器里追加的，
+     * 旧的 {@code vg.setVisibility(GONE)} 把它一起藏了。这就是用户报的
+     * 「关掉首页工具宫格，设置家被连带关闭」。
+     */
+    private static void applyToolGridVisibility(final ViewGroup vg, final boolean show) {
+        if (vg == null) return;
+        try {
+            if (vg.getVisibility() != View.VISIBLE) vg.setVisibility(View.VISIBLE);
+            int kids = vg.getChildCount();
+            for (int i = 0; i < kids; i++) {
+                View child = vg.getChildAt(i);
+                if (child == null) continue;
+                if (isChipsRow(child)) {
+                    child.setVisibility(View.VISIBLE);
+                    continue;
+                }
+                if (show) {
+                    if (GRID_HIDDEN.remove(child) != null) child.setVisibility(View.VISIBLE);
+                } else {
+                    GRID_HIDDEN.put(child, Boolean.TRUE);
+                    child.setVisibility(View.GONE);
+                }
+            }
+            H.log("event=amap_tool_grid_visibility show=" + show + " kids=" + kids);
+        } catch (Throwable t) {
+            H.log("event=amap_tool_grid_visibility error=" + t.getClass().getSimpleName());
+        }
+    }
+
     private static View decorateHomeRow(Object row, ClassLoader cl, Context ctx) {
         try {
             if (!(row instanceof ViewGroup) || ctx == null) return (View) row;
@@ -603,8 +674,18 @@ public final class AmapNativeHome {
             }
             } else {
                 // 原生宫格原样保留：不删子 View、不换容器、不自绘。
-                // 「整块工具栏」开关只映射成可见性（GONE 不占位；重新打开时恢复 VISIBLE）。
-                vg.setVisibility(Config.visible(Config.K_TOOLS_VISIBLE) ? View.VISIBLE : View.GONE);
+                // 「整块工具栏」开关只隐藏**宫格自己的子 View**：宿主把「设置家」那排
+                // chips 追加在同一个容器里，直接 GONE 容器会把设置家一起藏掉（用户 bug）。
+                final ViewGroup gridHolder = vg;
+                applyToolGridVisibility(gridHolder, Config.visible(Config.K_TOOLS_VISIBLE));
+                // 宿主有时在 decorate 之后才把格子 / chips 塞进来，layout 完再按同一规则刷一次。
+                try {
+                    gridHolder.post(new Runnable() {
+                        @Override public void run() {
+                            applyToolGridVisibility(gridHolder, Config.visible(Config.K_TOOLS_VISIBLE));
+                        }
+                    });
+                } catch (Throwable ignored) { }
                 relaxToolRows(vg, ctx);
                 if (!nativeToolGridReported) {
                     nativeToolGridReported = true;

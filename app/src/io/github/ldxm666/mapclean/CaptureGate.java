@@ -24,6 +24,8 @@ import java.io.FileOutputStream;
  */
 public final class CaptureGate {
 
+    private static final String TAG = "MapCleanCapture";
+
     /** 与 {@code mapadkiller.Baseline.DIR} 保持一致。 */
     public static final String DIR = "baseline";
     public static final String F_MODE = "capture.mode";
@@ -61,6 +63,33 @@ public final class CaptureGate {
         }
     }
 
+    /** 抓取是否正在进行（Baseline 写的 files/baseline/capture.running 标记）。 */
+    public static boolean capturing(Context c) {
+        try {
+            File f = file(c, "capture.running");
+            return f != null && f.isFile();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** 上次抓到的配置文件数（state.properties 里的 baseline_files），读不到返回 0。 */
+    public static int capturedFiles(Context c) {
+        File d = dir(c);
+        if (d == null) return 0;
+        java.io.InputStream in = null;
+        try {
+            in = new java.io.FileInputStream(new File(d, "state.properties"));
+            java.util.Properties p = new java.util.Properties();
+            p.load(in);
+            return Integer.parseInt(p.getProperty("baseline_files", "0").trim());
+        } catch (Throwable t) {
+            return 0;
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) { }
+        }
+    }
+
     /** 开/关采集模式。true=写入标记，false=删除标记。 */
     public static boolean setCaptureMode(Context c, boolean on) {
         try {
@@ -75,6 +104,13 @@ public final class CaptureGate {
             } finally {
                 out.close();
             }
+            // ★ 「重新抓取」必须先把上一轮的「已抓到 / 请重启」标记清掉：
+            // 否则面板读到 mode&&done 就以为已经抓完，直接弹「启用模块功能？」并重启，
+            // 真机表现就是「数据都没抓到就被重启了」（2026-10-27 复查确认）。
+            File stale = new File(d, F_DONE);
+            if (stale.isFile()) stale.delete();
+            stale = new File(d, F_RESTART);
+            if (stale.isFile()) stale.delete();
             return true;
         } catch (Throwable t) {
             return false;
@@ -85,6 +121,7 @@ public final class CaptureGate {
     public static final String F_RESTART = "restart.pending";
 
     private static boolean promptShown;
+    private static boolean toastShown;
     private static int ticks;
 
     private static File file(Context c, String name) {
@@ -117,6 +154,18 @@ public final class CaptureGate {
      */
     public static void tick(final android.app.Activity a) {
         if (a == null || promptShown || a.isFinishing()) return;
+        // 采集模式下先给一次明确提示：用户刚装完打开高德，界面上看不到任何「模块」痕迹，
+        // 不给提示就不知道「正在抓官方数据、可以正常用」。
+        if (!toastShown) {
+            try {
+                if (captureMode(a) && !captured(a)) {
+                    toastShown = true;
+                    android.widget.Toast.makeText(a.getApplicationContext(),
+                            "正在抓取官方数据，请正常用一次地图（首页 / 搜索 / 我的）",
+                            android.widget.Toast.LENGTH_LONG).show();
+                }
+            } catch (Throwable ignored) { }
+        }
         if (!restartPending(a)) {
             if (ticks++ > 30) return;
             try {
@@ -127,35 +176,61 @@ public final class CaptureGate {
             return;
         }
         promptShown = true;
+        // 只提示、不自动杀进程：抓取刚写完配置时用户可能还在浏览，自动重启会被当成「没抓到就重启」。
+        // 提示走高德同款的底部小气泡（Toast），不弹大白框。
+        final int files = capturedFiles(a);
+        toast(a, "✓ 官方数据已抓取完成（" + files + " 项），点悬浮球 → 重启并启用模块");
+        android.util.Log.i(TAG, "event=capture_done_toast files=" + files);
+    }
+
+    private static boolean recaptureChecked;
+
+    /**
+     * 模块版（LSPosed）专用：设置页点了「抓取云数据」之后，宿主进程下次 resume 时自己重启一次
+     * 进入采集模式。
+     *
+     * <p>为什么必须有这一步：{@code Baseline.maybeCapture()} 只在**进程启动**时判定一次，
+     * 而高德被拉起来时进程多半还活着，光把界面切到前台根本不会触发抓取 —— 用户看到的就是
+     * 「点了抓取，什么都没发生」。这里读面板写下的请求（RemotePreferences 或 root 兜底文件），
+     * 满足条件就写 {@code capture.mode} 再重启，下一次启动就是干净的一次采集。
+     *
+     * <p>安全阀：每个进程只判定一次；只认 10 分钟内的请求（避免很早以前的遗留请求在用户
+     * 开车导航时突然把高德重启）。
+     */
+    public static void applyRecaptureRequest(android.app.Activity activity) {
+        if (recaptureChecked || activity == null) return;
+        recaptureChecked = true;
         try {
-            new android.app.AlertDialog.Builder(a)
-                    .setTitle("✓ 已获取官方数据")
-                    .setMessage("官方下发的数据已经抓到，模块功能可以启用了。\n\n"
-                            + "3 秒后自动关闭高德并退出采集模式，重新打开高德就按你的设置生效。"
-                            + "（个别系统会拦截后台自启，没有自动打开就点一下桌面图标。）")
-                    .setCancelable(false)
-                    .setPositiveButton("现在重启", new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(android.content.DialogInterface d, int w) {
-                            setCaptureMode(a, false);
-                            restartHost(a);
-                        }
-                    })
-                    .show();
+            final long at = io.github.ldxm666.mapadkiller.Baseline.pendingRecaptureAt();
+            if (at <= 0L) return;
+            if (System.currentTimeMillis() - at > 10L * 60L * 1000L) {
+                android.util.Log.i(TAG, "event=recapture_request_stale at=" + at);
+                return;
+            }
+            if (!io.github.ldxm666.mapadkiller.Baseline.hasPendingRecapture()) return;
+            if (!setCaptureMode(activity, true)) return;
+            android.util.Log.i(TAG, "event=recapture_request_applied at=" + at);
+            // 这里**不**自杀重启：HyperOS/MIUI 的 Aurogon（应用冻结）对「短时间内被连续杀掉
+            // 两次」的应用会拉黑一段时间，闹钟拉起会被静默丢掉 —— 真机上表现就是抓完数据
+            // 高德再也没回来。改成让用户自己关掉再打开：一次流程只在高德进程内自杀一次
+            // （抓取完成后的 Baseline.maybeAutoRestart），实测闹钟能把高德拉回来。
+            toast(activity, "已请求抓取 · 请关掉高德再打开一次，即开始抓取");
+            android.util.Log.i(TAG, "event=recapture_user_restart_hint at=" + at);
         } catch (Throwable ignored) { }
+    }
+
+    /** 底部小气泡提示（浅色系统 Toast，和高德自己的「再按一次退出」同款）。 */
+    public static void toast(Context c, String text) {
         try {
-            a.getWindow().getDecorView().postDelayed(new Runnable() {
-                @Override public void run() {
-                    setCaptureMode(a, false);
-                    restartHost(a);
-                }
-            }, 5000L);
+            android.widget.Toast.makeText(c.getApplicationContext(), text,
+                    android.widget.Toast.LENGTH_LONG).show();
         } catch (Throwable ignored) { }
     }
 
     /**
      * 重启宿主：先排一个 1.5 秒后的系统闹钟拉起启动页，再杀掉自己。
      * 没有 root 不能 {@code am force-stop}，进程死了闹钟还在系统里，起来就是干净的一次启动。
-     * 顺便关掉采集模式（该标记只在抓取期间有意义）。
+     * 采集模式标记由调用方自己清除（该标记只在抓取期间有意义）。
      */
     public static void restartHost(Context c) {
         try {
@@ -174,12 +249,41 @@ public final class CaptureGate {
                 android.app.PendingIntent pi = android.app.PendingIntent.getActivity(app, 0x4D43, i, flags);
                 android.app.AlarmManager am =
                         (android.app.AlarmManager) app.getSystemService(Context.ALARM_SERVICE);
-                if (am != null) am.set(android.app.AlarmManager.RTC, System.currentTimeMillis() + 1500L, pi);
+                // 闹钟必须排在自杀**之后**：kill 在 +800ms，这里排 +2500ms。
+                // 之前是 +1500ms，闹钟把启动页拉起来的却是还活着的旧进程，接着 kill 一到
+                // 就把这个刚起来的窗口一起带走了 —— 真机上表现就是「高德直接没了」。
+                if (am != null) {
+                    long at = System.currentTimeMillis() + 2500L;
+                    // setAlarmClock 在真机上抛 SecurityException（高德没有 SCHEDULE_EXACT_ALARM
+                    // 权限），所以只用 setExactAndAllowWhileIdle，失败再退回 inexact。
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= 23) {
+                            am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                        } else {
+                            am.set(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                        }
+                        android.util.Log.i(TAG, "event=restart_alarm kind=exact at=" + at);
+                    } catch (Throwable t) {
+                        am.set(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                        android.util.Log.i(TAG, "event=restart_alarm kind=inexact at=" + at);
+                    }
+                }
             }
         } catch (Throwable ignored) { }
         try {
+            final Context app2 = c.getApplicationContext();
             new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                private int waited;
                 @Override public void run() {
+                    // 抓取线程还没落完盘就不杀进程（否则会抓到一半被杀，重启后又是半套基线）。
+                    try {
+                        if (capturing(app2) && waited < 20) {
+                            waited++;
+                            new android.os.Handler(android.os.Looper.getMainLooper())
+                                    .postDelayed(this, 1000L);
+                            return;
+                        }
+                    } catch (Throwable ignored) { }
                     try {
                         android.os.Process.killProcess(android.os.Process.myPid());
                     } catch (Throwable ignored) { }

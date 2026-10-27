@@ -36,6 +36,16 @@ public final class Spec {
     public static final String K_WX_CARD = "wx_card";
     public static final String K_AI_NOW = "ai_now_card";
     public static final String K_MAP_POI = "map_poi";
+    /** 地图浮层挂件：左下角「低碳能量」气泡 + 「一键穿越」浮标。 */
+    public static final String K_ROUTE_WIDGET = "route_widget";
+    /** 路线详情中间插入的横幅广告。 */
+    public static final String K_ROUTE_AD = "route_ad";
+    /** 路线页底部「探索××周边」三图推荐卡。 */
+    public static final String K_ROUTE_EXPLORE = "route_explore";
+    /** 路线页底部「特惠打车」领券条。 */
+    public static final String K_ROUTE_TAXI = "route_taxi";
+    /** 首页出行方式快捷格里的「古今地图」入口。 */
+    public static final String K_ROUTE_GUJIN = "route_gujin";
     /** 搜索框下面那排快捷入口（美食 / 加油站 / 景点 / 厕所 / 酒店…）。默认显示。 */
     public static final String K_SEARCH_CHIPS = "search_chips";
 
@@ -89,8 +99,23 @@ public final class Spec {
      *     —— 用户要的就是它们消失，其余区块默认保持原样。
      */
     public static boolean defaultVisible(String key) {
-        if (K_MINE_OPS.equals(key) || K_MINE_AD.equals(key) || K_AI_NOW.equals(key) || K_MAP_POI.equals(key)) return false;
+        if (K_MINE_OPS.equals(key) || K_MINE_AD.equals(key) || K_AI_NOW.equals(key)) return false;
+        // 路线页的浮层/推荐位：用户要的就是它们消失，默认关（隐藏）。
+        if (K_ROUTE_WIDGET.equals(key) || K_ROUTE_AD.equals(key)
+                || K_ROUTE_EXPLORE.equals(key) || K_ROUTE_TAXI.equals(key)
+                || K_ROUTE_GUJIN.equals(key)) return false;
+        // 地图标注：总开关 + 13 个分类 + 长尾桶，默认全部「关（隐藏）」。
+        // 这里必须和 BaiduLabelSettings.rows() 的默认值、BaiduPoiLayer.hiddenCategories()
+        // 的缺省值保持一致 —— 三处任何一处不同，设置页显示「开」而实际在隐藏。
+        if (isPoiKey(key)) return false;
         return true;
+    }
+
+    /** 是不是「地图标注」那一族键（总开关 / 13 个分类 / 长尾桶）。 */
+    public static boolean isPoiKey(String key) {
+        if (K_MAP_POI.equals(key) || BaiduLabelSettings.KEY_OTHER.equals(key)) return true;
+        for (BaiduLabelSettings.Cat c : BaiduLabelSettings.CATS) if (c.key.equals(key)) return true;
+        return false;
     }
 
     /** 运营卡闸门：两者任一被关就摘 phoneInfo.gk（JS 里这四张卡共用它） */
@@ -148,6 +173,7 @@ public final class Spec {
     public static final int CAT_MINE = 6;
     public static final int CAT_MAP = 7;
     public static final int CAT_SEARCH = 8;
+    public static final int CAT_ROUTE = 9;
 
     /** 频道栏文案锚点（需同一容器内同时命中 ≥2 个才算频道栏，避免误伤卡片文案） */
     public static final String[] CHIP_ANCHORS = {"推荐", "看世界", "成都市"};
@@ -329,10 +355,16 @@ public final class Spec {
                 new Row(K_MINE_AD,"热门活动 / 资源位",null,false),new Row(K_MINE_VOICE,"热门语音",null,false),
                 new Row(K_MINE_CAR,"我的车",null,false),new Row(K_MINE_CARNAV,"导航车标（区块）",null,false),
                 new Row(K_MINE_BUILD,"全民共建 / 反馈中心",null,false),new Row(K_MINE_SPORT,"百度运动",null,false),new Row(K_MINE_GRID,"顶部图标宫格",null,false)}),
-            new Cat(CAT_MAP,"地图标注","统一关闭兴趣点图标和店名，保留地名、街道和城市名称。修改后彻底关闭并重新打开百度生效。",BaiduLabelSettings.rows()),
+            new Cat(CAT_MAP,"地图标注","按类型分别控制地图上的兴趣点图标与店名；地名、街道、城市名和路网始终保留。改动后需彻底关闭再打开百度。",BaiduLabelSettings.rows()),
             new Cat(CAT_SEARCH,"搜索区","搜索框下方那排快捷入口。",new Row[]{
                 new Row(K_SEARCH_CHIPS,"显示搜索框快捷入口","关掉后搜索框下面那排（美食 / 加油站 / 景点 / 厕所 / 酒店…）整体隐藏。",true)}),
-            new Cat(CAT_DIAG,"诊断","百度 22.0.0 版本适配；改动后重启百度生效。",new Row[]{new Row(Cfg.K_DEBUG,"调试日志",null,false)})
+            new Cat(CAT_ROUTE,"路线页","地铁 / 公交方案详情页上的浮层与推荐位。改动后需彻底关闭再打开百度。",new Row[]{
+                new Row(K_ROUTE_WIDGET,"地图浮层挂件","地图左下角的「低碳能量」气泡和「一键穿越」浮标。",false),
+                new Row(K_ROUTE_AD,"横幅广告","路线详情中间插入的广告横幅（右下角带「广告」角标那条）。",false),
+                new Row(K_ROUTE_EXPLORE,"探索周边","路线页底部「探索××周边」的三图推荐卡片。",false),
+                new Row(K_ROUTE_TAXI,"特惠打车","路线页底部的「特惠打车」领券横幅。",false),
+                new Row(K_ROUTE_GUJIN,"古今地图入口","首页出行方式快捷格里的「古今地图」那一格（与步行/骑行同一排）。",false)}),
+            new Cat(CAT_DIAG,"诊断","百度 22.1.0 (1660) 适配；改动后重启百度生效。",new Row[]{new Row(Cfg.K_DEBUG,"调试日志",null,false)})
         };return CATS;
     }
 

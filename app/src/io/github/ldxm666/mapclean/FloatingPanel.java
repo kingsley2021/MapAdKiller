@@ -20,6 +20,8 @@ import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
 
+import io.github.ldxm666.mapadkiller.CaptureLog;
+
 
 /**
  * The settings sheet the floating orb opens: a glass bottom sheet with a category rail
@@ -1175,6 +1177,7 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         // The about row is rebuilt with every page switch; drop the stale reference so a late
         // update result cannot paint into a detached view.
         aboutUpdateRow = null;
+        captureLogButton = null;
         body.removeAllViews();
         // The old rows (and their sliders) are gone with the body; drop the refs so sync()
         // can never poke a detached view.
@@ -1212,7 +1215,10 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
             }
             // 当前版本 / 检查更新：挂在「其他」页底部。免 root 内置版没有 MainActivity，
             // 这两行是它唯一的版本信息与更新入口。
-            if (g.about) body.addView(buildAboutRows());
+            if (g.about) {
+                body.addView(buildCaptureLogRow());
+                body.addView(buildAboutRows());
+            }
         }
         if (animate) {
             body.setAlpha(0f);
@@ -1509,49 +1515,90 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
      */
     // ─────────────────────────────────── 首次使用：抓取官方下发数据（v2.2.6）
 
-    /** 首页「首次使用」通栏的状态机：红=还没抓，琥珀=抓取中，绿=已抓到待启用。 */
+    /**
+     * 首页「首次使用」卡片：一行状态 + 一个显式按钮 + 一行说明。
+     *
+     * <p>状态只反映事实（没抓 / 抓取中 / 已就绪），按钮才是入口——之前的整条通栏可点，
+     * 用户根本看不出那是个按钮。抓取成功后按钮变成「重新抓取」，随时能手动补抓。
+     */
     private View buildCaptureBanner() {
         try {
             final boolean mode = CaptureGate.captureMode(context);
             final boolean done = CaptureGate.captured(context);
-            if (done && !mode) return null;
-            final String text;
-            final String desc;
-            final int bg;
-            if (mode && done) {
-                text = "✓ 已获取官方数据 · 点这里重启并启用模块 →";
-                desc = "已获取官方数据，点这里重启并启用模块";
-                bg = 0xFF1E8E3E;
-            } else if (mode) {
-                text = "正在抓取官方数据… 请正常用一次地图（首页 / 搜索 / 我的）→";
-                desc = "正在抓取官方数据，请正常使用地图";
-                bg = 0xFFB26A00;
+            final boolean running = CaptureGate.capturing(context);
+            final String status;
+            final int tint;
+            if (mode && (running || !done)) {
+                status = "正在抓取官方数据…";
+                tint = 0xFFB26A00;
+            } else if (done) {
+                status = "官方数据已就绪";
+                tint = 0xFF1E8E3E;
             } else {
-                text = "⚠ 首次使用必须先抓一次官方数据 · 点这里开始 →";
-                desc = "首次使用必须先抓一次官方数据，点这里开始";
-                bg = 0xFFC62828;
+                status = "还没抓取官方数据";
+                tint = 0xFFC62828;
             }
+            final String label;
+            final String caption;
+            if (mode) {
+                label = done ? "重启并启用模块" : "查看抓取进度";
+                caption = done
+                        ? "数据已抓完，重启一次即可按你的设置运行"
+                        : "抓取期间模块全部暂停，请正常用一次地图（首页 / 搜索 / 我的）";
+            } else if (done) {
+                label = "重新抓取官方数据";
+                caption = "图标缺失、工具宫格不全、家/单位不生效时点这里重抓";
+            } else {
+                label = "立即抓取官方数据";
+                caption = "首次安装必须先抓一次，否则图标不显示、宫格缺格";
+            }
+
             LinearLayout wrap = new LinearLayout(context);
             wrap.setOrientation(LinearLayout.VERTICAL);
-            wrap.setPadding(UiKit.dp(context, 14), UiKit.dp(context, 8),
-                    UiKit.dp(context, 14), UiKit.dp(context, 2));
-            TextView banner = new TextView(context);
-            banner.setText(text);
-            banner.setTextSize(13f);
-            banner.setTextColor(0xFFFFFFFF);
-            banner.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
-            banner.setGravity(Gravity.CENTER_VERTICAL);
-            banner.setPadding(UiKit.dp(context, 14), UiKit.dp(context, 11),
-                    UiKit.dp(context, 14), UiKit.dp(context, 11));
-            banner.setBackground(UiKit.plate(bg, UiKit.dpf(context, 14f)));
-            banner.setContentDescription(desc);
-            UiKit.pressable(banner, 0.97f);
-            banner.setOnClickListener(new OnClickListener() {
+            wrap.setPadding(UiKit.dp(context, 20), UiKit.dp(context, 10),
+                    UiKit.dp(context, 20), UiKit.dp(context, 4));
+
+            TextView pill = new TextView(context);
+            pill.setText(status);
+            pill.setTextSize(12f);
+            pill.setTextColor(tint);
+            pill.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            pill.setGravity(Gravity.CENTER);
+            pill.setPadding(UiKit.dp(context, 10), UiKit.dp(context, 5),
+                    UiKit.dp(context, 10), UiKit.dp(context, 5));
+            pill.setBackground(UiKit.plate((tint & 0x00FFFFFF) | 0x22000000,
+                    UiKit.dpf(context, 8f)));
+            LinearLayout.LayoutParams pillLp = new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+            pillLp.bottomMargin = UiKit.dp(context, 8);
+            wrap.addView(pill, pillLp);
+
+            TextView button = new TextView(context);
+            button.setText(label);
+            button.setTextSize(13.5f);
+            button.setTextColor(0xFFFFFFFF);
+            button.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+            button.setGravity(Gravity.CENTER);
+            button.setPadding(0, UiKit.dp(context, 11), 0, UiKit.dp(context, 11));
+            button.setBackground(UiKit.gradient(cAccentTop(), cAccentBottom(),
+                    UiKit.dpf(context, 14f)));
+            button.setContentDescription(label);
+            UiKit.pressable(button, 0.97f);
+            button.setOnClickListener(new OnClickListener() {
                 @Override public void onClick(View v) {
                     onCaptureBanner(mode, done);
                 }
             });
-            wrap.addView(banner, new LinearLayout.LayoutParams(
+            wrap.addView(button, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
+
+            TextView hint = new TextView(context);
+            hint.setText(caption);
+            hint.setTextSize(11f);
+            hint.setTextColor(cTxS());
+            hint.setLineSpacing(0f, 1.2f);
+            hint.setPadding(0, UiKit.dp(context, 6), 0, 0);
+            wrap.addView(hint, new LinearLayout.LayoutParams(
                     LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
             return wrap;
         } catch (Throwable t) {
@@ -1562,24 +1609,21 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
     private void onCaptureBanner(final boolean mode, final boolean done) {
         try {
             if (mode && done) { confirmEnableModule(); return; }
+            if (!mode && done) { confirmRecapture(); return; }
             if (mode) {
-                new android.app.AlertDialog.Builder(context)
-                        .setTitle("正在抓取官方数据")
-                        .setMessage("现在请像平时那样用一遍地图：打开首页、搜一次、进一次「我的」，"
-                                + "然后回到这里。\n\n抓取在后台自动完成，成功后这条会变成绿色。")
-                        .setPositiveButton("知道了", null)
-                        .show();
+                CaptureDialog.show(context, "正在抓取官方数据",
+                        "现在请像平时那样用一遍地图：打开首页、搜一次、进一次「我的」。\n\n"
+                                + "抓取在后台自动完成，成功后这里会变成「重启并启用模块」。",
+                        "知道了", null, null, null);
                 return;
             }
-            new android.app.AlertDialog.Builder(context)
-                    .setTitle("先抓一次官方数据")
-                    .setMessage("高德的首页卡片、金刚位、工具宫格都是服务端下发的。"
-                            + "模块第一次必须让高德跑一遍纯官方，把这份数据抓下来，"
+            CaptureDialog.show(context, "先抓一次官方数据",
+                    "高德的首页卡片、金刚位、工具宫格都是服务端下发的。"
+                            + "第一次必须让高德跑一遍纯官方，把这份数据抓下来，"
                             + "之后才按你的设置改；否则会出现图标不显示、宫格缺格。\n\n"
-                            + "点「开始」后高德会自动重启一次，期间模块功能全部关闭（悬浮窗保留）。")
-                    .setNegativeButton("取消", null)
-                    .setPositiveButton("开始", new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(android.content.DialogInterface d, int w) {
+                            + "点「开始抓取」后高德会重启一次，期间模块功能全部关闭（悬浮窗保留）。",
+                    "开始抓取", new Runnable() {
+                        @Override public void run() {
                             if (!CaptureGate.setCaptureMode(context, true)) {
                                 toast("写入采集标记失败，请检查存储权限");
                                 return;
@@ -1587,8 +1631,31 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
                             toast("正在重启高德，请稍候…");
                             restartHost();
                         }
-                    })
-                    .show();
+                    },
+                    "取消", null);
+        } catch (Throwable t) {
+            toast("操作失败：" + t.getMessage());
+        }
+    }
+
+    /** 已抓过之后的重抓入口：先关模块（采集模式），抓完再重启恢复。 */
+    private void confirmRecapture() {
+        try {
+            CaptureDialog.show(context, "重新抓取官方数据？",
+                    "会先关闭模块功能并重启高德，正常用一次（首页 / 搜索 / 我的）后自动抓取，"
+                            + "抓完再重启一次就恢复你的设置。\n\n期间悬浮窗保留，面板顶部状态会从黄色变绿色。"
+                            + "\n\n什么时候需要重抓：高德大版本更新、首页图标/宫格明显不对、或者你换了常驻城市。",
+                    "开始抓取", new Runnable() {
+                        @Override public void run() {
+                            if (!CaptureGate.setCaptureMode(context, true)) {
+                                toast("写入采集标记失败，请检查存储权限");
+                                return;
+                            }
+                            toast("正在重启高德，请稍候…");
+                            restartHost();
+                        }
+                    },
+                    "取消", null);
         } catch (Throwable t) {
             toast("操作失败：" + t.getMessage());
         }
@@ -1596,16 +1663,13 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
 
     private void confirmEnableModule() {
         try {
-            new android.app.AlertDialog.Builder(context)
-                    .setTitle("启用模块功能？")
-                    .setMessage("官方数据已经抓到了。点「重启」后高德会自动重启，模块功能正式生效。")
-                    .setNegativeButton("稍后", null)
-                    .setPositiveButton("重启", new android.content.DialogInterface.OnClickListener() {
-                        @Override public void onClick(android.content.DialogInterface d, int w) {
-                            finishCapture();
-                        }
-                    })
-                    .show();
+            CaptureDialog.show(context, "启用模块功能？",
+                    "官方数据已经抓到了（共 " + CaptureGate.capturedFiles(context) + " 个配置文件）。"
+                            + "点「立即重启」后高德会重启一次，模块功能正式生效。",
+                    "立即重启", new Runnable() {
+                        @Override public void run() { finishCapture(); }
+                    },
+                    "稍后", null);
         } catch (Throwable t) {
             finishCapture();
         }
@@ -1627,7 +1691,7 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
      * 再杀掉自己」：进程死了闹钟还在系统里，起来就是干净的一次启动。
      */
     private void restartHost() {
-        // 统一走 CaptureGate：它同时负责关掉采集模式、清掉 restart.pending。
+        // 采集模式标记由调用方自己清（「开始抓取」要带着标记重启）。
         CaptureGate.restartHost(context);
     }
 
@@ -1714,6 +1778,108 @@ public final class FloatingPanel extends FrameLayout implements PanelTypes {
         wrap.addView(button, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT));
         return wrap;
+    }
+
+    /* ------------------------------------------------------------ 主动抓包（诊断） */
+
+    /** 面板重建时会被置空；倒计时线程只在还挂着窗口时才继续刷。 */
+    private TextView captureLogButton;
+
+    /**
+     * 「其他」页底部的主动抓包：两行按钮。
+     * 上：抓「前 10 分钟」——内存环形缓冲里已经有的，点了立刻出 txt；
+     * 下：抓「后 10 分钟」——从现在开始录，再点一下提前结束。
+     */
+    private View buildCaptureLogRow() {
+        LinearLayout wrap = new LinearLayout(context);
+        wrap.setOrientation(LinearLayout.VERTICAL);
+        wrap.setPadding(UiKit.dp(context, 20), UiKit.dp(context, 10),
+                UiKit.dp(context, 20), UiKit.dp(context, 6));
+
+        final TextView before = captureButton("抓取前 10 分钟（立即生成 txt）");
+        before.setOnClickListener(new OnClickListener() {
+            @Override public void onClick(View v) {
+                toast("正在导出最近十分钟的数据…");
+                String path = null;
+                try {
+                    path = CaptureLog.dumpRecent(context);
+                } catch (Throwable t) {
+                    Log.w(TAG, "event=capture_dump_fail err=" + t.getClass().getName());
+                }
+                toast(path != null ? "已保存：" + path : "导出失败：系统拒绝写文件，见 logcat");
+            }
+        });
+        wrap.addView(before, matchWrap());
+
+        final TextView after = captureButton(captureLogLabel());
+        after.setOnClickListener(new OnClickListener() {
+            @Override public void onClick(View v) {
+                boolean started = false;
+                try {
+                    started = CaptureLog.toggleLive(context);
+                } catch (Throwable t) {
+                    Log.w(TAG, "event=capture_toggle_fail err=" + t.getClass().getName());
+                }
+                after.setText(captureLogLabel());
+                toast(started ? "正在抓取最近十分钟的数据…" : "已结束抓包，txt 已生成");
+                if (started) tickCaptureLog(after);
+                Log.i(TAG, "event=capture_toggle running=" + started);
+            }
+        });
+        captureLogButton = after;
+        LinearLayout.LayoutParams lp = matchWrap();
+        lp.topMargin = UiKit.dp(context, 8);
+        wrap.addView(after, lp);
+
+        TextView hint = new TextView(context);
+        hint.setText("「前 10 分钟」立刻导出已经发生的事（只含这次打开高德以后的），"
+                + "「后 10 分钟」从这一刻开始录。"
+                + "两份 txt 都存到「内部存储/下载/MapClean/」，打开文件管理器点「下载」就能看到；"
+                + "万一系统不给写，会自动落到 Android/data/包名/files/MapClean/。");
+        hint.setTextSize(11f);
+        hint.setTextColor(cTxS());
+        hint.setLineSpacing(UiKit.dp(context, 2), 1.2f);
+        hint.setPadding(UiKit.dp(context, 2), UiKit.dp(context, 8), UiKit.dp(context, 2), 0);
+        wrap.addView(hint, matchWrap());
+        if (CaptureLog.running()) tickCaptureLog(after);
+        return wrap;
+    }
+
+    private TextView captureButton(String text) {
+        TextView button = new TextView(context);
+        button.setText(text);
+        button.setTextSize(13.5f);
+        button.setTextColor(0xFFFFFFFF);
+        button.setTypeface(android.graphics.Typeface.DEFAULT_BOLD);
+        button.setGravity(Gravity.CENTER);
+        button.setPadding(0, UiKit.dp(context, 11), 0, UiKit.dp(context, 11));
+        button.setBackground(UiKit.gradient(cAccentTop(), cAccentBottom(),
+                UiKit.dpf(context, 14f)));
+        UiKit.pressable(button, 0.97f);
+        return button;
+    }
+
+    private LinearLayout.LayoutParams matchWrap() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
+
+    private String captureLogLabel() {
+        if (!CaptureLog.running()) return "抓取后 10 分钟（从现在开始录）";
+        int left = CaptureLog.remainSeconds();
+        return String.format(java.util.Locale.US,
+                "正在抓取最近十分钟的数据… 剩余 %d:%02d（点此提前结束）", left / 60, left % 60);
+    }
+
+    /** 面板开着时每秒刷一次倒计时；面板关了（没有 windowToken）就自动停。 */
+    private void tickCaptureLog(final TextView button) {
+        button.postDelayed(new Runnable() {
+            @Override public void run() {
+                if (button.getWindowToken() == null) return;
+                button.setText(captureLogLabel());
+                if (CaptureLog.running()) button.postDelayed(this, 1000L);
+            }
+        }, 1000L);
     }
 
     /* ------------------------------------------------------------------ 外观行 */

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.ldxm666.mapadkiller"
-    android:versionCode="2260"
-    android:versionName="2.2.6">
+    android:versionCode="2270"
+    android:versionName="2.2.7">
 
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="34" />
 
@@ -88,6 +88,20 @@
             百度侧：目标进程里的 hook 通过显式广播回报钩子状态与规则命中结果。
             接收方只把文本写进本地存储并刷新设置页，且校验 App 侧生成的 token。
         -->
+        <!--
+            高德侧：抓取云数据的状态回报（抓完 / 失败 / 文件数）。
+            宿主进程写不了 RemotePreferences（hook 侧只读实现），只能靠这条显式广播把
+            「到底抓到没」告诉设置页 —— 不做这一步，首页永远显示「未抓取」，用户就会
+            以为抓取一直失败。
+        -->
+        <receiver
+            android:name="io.github.ldxm666.mapadkiller.CaptureReportReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="io.github.ldxm666.mapadkiller.CAPTURE_STATUS" />
+            </intent-filter>
+        </receiver>
+
         <receiver
             android:name="io.github.ldxm666.bmapclean.ReportReceiver"
             android:exported="true">

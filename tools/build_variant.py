@@ -41,7 +41,8 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-APP = ROOT / "app"
+# 交接包是 src\ 布局，2.3.0 树是 app\ 布局
+APP = (ROOT / "app") if (ROOT / "app").is_dir() else (ROOT / "src")
 
 TAG = "v1.2"
 CLI_NAME = "lspatch-v1.2-487-release.jar"
@@ -80,6 +81,7 @@ DROP_MAPCLEAN_FILES = {
     "MainActivity.java",        # standalone settings page; the orb replaces it
     "EmbeddedSettings.java",    # old long-press entry; the orb replaces it
     "Pager.java",               # used only by MainActivity
+    "Backdrop.java",            # photo backdrop for the glass settings page
     # NOTE: UpdateChecker.java is deliberately NOT dropped.
     # It was listed as standalone-app only, but the embedded build now shows the module
     # version + a check-for-updates action in the floating panel (user request).
@@ -117,10 +119,14 @@ STUB_DIR = ROOT / "tools" / "variant-stubs"
 SHARED_STUBS = (
     "io/github/ldxm666/mapclean/EmbeddedSettings.java",
     "io/github/ldxm666/mapclean/MainActivity.java",
+    # The floating-window code asks "am I an embedded build?" through HostInfo, which lives in
+    # mapadkiller -- a package every vendor variant drops. The stub answers true (an embedded
+    # build IS the embedded form), so 百度/腾讯 内置版 keep their orb.
+    "io/github/ldxm666/mapadkiller/HostInfo.java",
 )
 
 # Classes the shared code still names after a vendor package is dropped, so they get a no-op.
-STUBBED_CLASSES = ("MainHook", "App")
+STUBBED_CLASSES = ("MainHook", "App", "Config", "HostInfo", "Baseline", "CaptureLog")
 
 FLOATING_REQUIRED = (
     b"Lio/github/ldxm666/mapclean/FloatingBall;",
@@ -201,8 +207,10 @@ TARGETS = {
         "slimModule": "MapAdKiller-tmap-slim-{version}.apk",
         "dropPackages": ("io.github.ldxm666.mapadkiller", "io.github.ldxm666.bmapclean"),
         "stubs": SHARED_STUBS + (
+            "io/github/ldxm666/mapadkiller/Config.java",
             "io/github/ldxm666/mapadkiller/App.java",
             "io/github/ldxm666/mapadkiller/MainHook.java",
+                "io/github/ldxm666/mapadkiller/Baseline.java",
             "io/github/ldxm666/bmapclean/App.java",
             "io/github/ldxm666/bmapclean/MainHook.java",
             "io/github/ldxm666/mapclean/AmapPanel.java",
@@ -227,8 +235,11 @@ TARGETS = {
         "slimModule": "MapAdKiller-baidu-slim-{version}.apk",
         "dropPackages": ("io.github.ldxm666.mapadkiller",),
         "stubs": SHARED_STUBS + (
+            "io/github/ldxm666/mapadkiller/Config.java",
             "io/github/ldxm666/mapadkiller/App.java",
             "io/github/ldxm666/mapadkiller/MainHook.java",
+                "io/github/ldxm666/mapadkiller/Baseline.java",
+                "io/github/ldxm666/mapadkiller/CaptureLog.java",
             "io/github/ldxm666/mapclean/AmapPanel.java",
             "io/github/ldxm666/mapclean/TmapPanel.java",
         ),

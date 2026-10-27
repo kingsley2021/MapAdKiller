@@ -176,8 +176,15 @@ public final class HostInfo {
             // 以为自己装的是官方包。真正要回答的问题「用户装的是官方版还是内置版」，
             // 用 embedded 一个字段就够了（判据是宿主 APK 里有没有 assets/lspatch/config.json，
             // 不经过 PackageManager，一直准确）。
-            H.log("event=host_mode pkg=" + pkg + " embedded=" + emb
-                    + (emb ? " kind=lspatch-embedded" : " kind=official-or-lsposed"));
+            String modeLine = "event=host_mode pkg=" + pkg + " embedded=" + emb
+                    + (emb ? " kind=lspatch-embedded" : " kind=official-or-lsposed");
+            // 宿主进程里走 H.log（顺带进「运行日志」）；设置页进程里 H 类初始化会失败
+            // （缺 libxposed API），兜底用 SafeLog，别让这一行日志把整个方法打断。
+            try {
+                H.log(modeLine);
+            } catch (Throwable t) {
+                SafeLog.i(MainHook.TAG, modeLine);
+            }
             // 只有在真正打出日志之后才记入去重集合：拿不到 Context / 抛异常时不会占位。
             REPORTED.add(pkg);
         } catch (Throwable ignored) { }

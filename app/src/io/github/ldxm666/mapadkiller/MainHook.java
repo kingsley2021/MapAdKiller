@@ -67,6 +67,14 @@ public final class MainHook {
         // 放在进程分支之前 ⇒ 主进程和所有子进程一起透传（AmapSubprocess 也不装）。
         if (PKG_AMAP.equals(pkg) && Baseline.maybeCapture()) {
             H.log(Log.INFO, TAG, "event=baseline_passthrough process=" + process);
+            // 「安装包异常」修复 #2 在**透传模式也要跑**：它不是 hook，只是把宿主自己的
+            // 原生库按依赖顺序提前装一遍（见 AmapLibDirFix 注释），不改高德任何行为。
+            // 必须有这一句 —— 「覆盖安装后首次冷启动 namespace 库目录错位」正好落在
+            // 版本升级后第一次启动（= 透传这一次），否则又会弹「安装包异常」。
+            if (process == null || !process.contains(":")) {
+                try { AmapLibDirFix.install(param.getClassLoader()); }
+                catch (Throwable t) { H.log(Log.WARN, TAG, "event=libdir_thread_failed", t); }
+            }
             // 采集模式（纯官方）也要保留悬浮窗：面板「首页」页那条红/黄/绿提示条要靠它显示，
             // 否则第一次进来的用户既看不到进度、也找不到「点这里重启启用」的入口。其余 hook 一条不装。
             if (process == null || !process.contains(":")) {

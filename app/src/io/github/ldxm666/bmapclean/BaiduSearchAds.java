@@ -18,9 +18,12 @@ final class BaiduSearchAds {
     static void install(ClassLoader loader) {
         installRankingList(loader);
         android.content.pm.PackageInfo version=io.github.ldxm666.mapclean.Compatibility.packageInfo(loader,MainHook.PKG_BMAP);
-        // These private UI methods and the advertctrl response path are
-        // verified on 22.0.0 only. Unknown builds keep their original behavior.
-        if(version!=null&&version.versionCode==1650)installSearchPromotions(loader);
+        // 22.0.0 (1650) 起生效。旧写法是 `versionCode == 1650`，等于 22.0.40 /
+        // 22.0.50 / 22.1.0 整段被跳过 —— 搜索框那一栏的推广就是这么漏出来的
+        // （用户报障「搜索框下一栏隐藏失效，开关无用」）。
+        // 反射段自带 try/catch + schema 校验（见 installSearchPromotions 末尾的
+        // ReflectiveOperationException 分支），版本不符只会记 unsupported，不会崩。
+        if(version==null||version.versionCode>=1650)installSearchPromotions(loader);
         Class<?> presenter=H.cls(loader,"com.baidu.baidumaps.poi.newpoi.home.presenter.PoiRecommendHotWordPresenter");
         Class<?> template=H.cls(loader,"com.baidu.entity.pb.HwResult$ReciTemplate");
         BaiduHooks.hook(presenter,"onCreateView",chain -> {

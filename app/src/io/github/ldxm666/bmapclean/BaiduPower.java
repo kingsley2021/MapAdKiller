@@ -180,9 +180,21 @@ final class BaiduPower {
             return;
         }
         final String K = Cfg.K_TRACK_OFF;
-        // 穿山甲 SDK 初始化：返回 false = 初始化失败，SDK 自己会放弃。
-        h(cl, "com.bytedance.sdk.openadsdk.TTAdSdk", "init", 2,
-                "baidu.power.ad.init", K, constFalse("TTAdSdk.init(Context,TTAdConfig)"));
+        // ⚠ 穿山甲**不能拦 init**。TTAdSdk.init(Context,TTAdConfig) 的唯一职责是把
+        // config 存进静态字段；真正的 SDK 启动在 start(TTAdSdk$Callback)。
+        //
+        // 2.2.6 及以前这里返回 false ⇒ TTAdConfig 恒为 null。百度进路线规划拉竞价广告时
+        // （IntegratedAdProvider.fetchBiddingAd → GromoreBiddingAd.u → Initializer.c）
+        // 照旧调 TTAdSdk.start()，start 内部 bm() 校验 config 非空，直接抛
+        //   IllegalArgumentException: TTAdConfig is null, please exec TTAdSdk.init before TTAdSdk.start.
+        // 该异常落在主线程 BaseHttpResponseHandler 回调里 ⇒ 百度 BMUncaughtExceptionHandler
+        // → UICrashCollector → Process.killProcess(SIG 9) 自杀 = 用户看到的「进路线规划闪退」。
+        // 真机日志实证：10-27 15:57:19.842 pid 17468，12:25:06 pid 2314，同一形态。
+        //
+        // 正确断点是 start：init 放行（只存 config，不联网、不起线程），start 短路 ⇒
+        // SDK 依然不启动、不产生广告流量，但任何 Pangle API 的 bm() 校验都能过，不会再抛。
+        h(cl, "com.bytedance.sdk.openadsdk.TTAdSdk", "start", 1,
+                "baidu.power.ad.start", K, noOp("TTAdSdk.start(TTAdSdk$Callback)"));
         // CSJ Binder 池服务：不发布 binder。
         h(cl, "com.byazt.xx.BinderPoolService", "onBind", 1,
                 "baidu.power.ad.binder", K, constNull("BinderPoolService.onBind(Intent)"));

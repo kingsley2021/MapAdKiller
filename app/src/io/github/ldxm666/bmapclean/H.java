@@ -58,8 +58,17 @@ public final class H {
         try { return cl.loadClass(name); } catch (Throwable t) { return null; }
     }
 
-    /** 挂一个方法；返回是否成功。首火打一条 HIT，便于区分"没挂上"和"没触发"。 */
-    public static boolean hook(Method m, String id, XposedInterface.Hooker hk) {
+    /**
+     * 挂一个可执行体（方法**或构造器**）；返回是否成功。
+     *
+     * <p>参数类型是 {@link java.lang.reflect.Executable} 而不是 {@code Method}：
+     * 构造器在反射里是 {@code Constructor}，**不在 {@code getDeclaredMethods()} 里**，
+     * 必须走 {@code getDeclaredConstructors()}。libxposed 的
+     * {@code hook(Executable)} 两者都收，所以这里放宽类型。
+     * （2.2.7 第一次写"创建即隐藏"时按 Method 找 {@code <init>}，结果一个都没挂上，
+     * 日志里就是 {@code widgets=0/8}。）
+     */
+    public static boolean hook(java.lang.reflect.Executable m, String id, XposedInterface.Hooker hk) {
         if (m == null) {
             miss.incrementAndGet();
             log(Log.WARN, MainHook.TAG, "miss " + id + " (method not found)");

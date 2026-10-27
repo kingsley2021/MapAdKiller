@@ -4,7 +4,12 @@ package io.github.ldxm666.mapadkiller;
 public final class AmapHooks {
     private AmapHooks() {}
     public static void install(final ClassLoader cl) {
+        // 「安装包异常」修复 #2：覆盖安装后首次冷启动的 linker namespace 库目录错位。
+        // 必须是第一个 feature（越早越好，要点在 ContentProvider 之前跑完）。
+        feature("libdir_fix", new Runnable() { public void run() { AmapLibDirFix.install(cl); } });
         AmapProtocolHooks.compatible(cl);
+        // 「安装包异常」修复：原生库 libamaptts/libxquic 预加载（见 AmapSoPreload 注释）。
+        feature("so_preload", new Runnable() { public void run() { AmapSoPreload.install(cl); } });
         Class<?> preloader = H.cls(cl, "com.autonavi.bundle.amaphome.impl.BootBizDataPreloaderImpl");
         H.hookSig(preloader, "canShowSplash", "amap_splash_gate", H.FALSE);
         feature("search", new Runnable() { public void run() { HotWordGuard.install(cl); } });

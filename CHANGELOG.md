@@ -1,3 +1,41 @@
+## v2.2.7（versionCode 2270）— 百度 22.1.0 适配、搜索 chip、路线页横幅
+
+发布日期：2026-10-27。版本码：2270。基线 v2.2.6（版本码 2260）。
+
+### 修复
+
+- **百度首页整页白屏**：`applySearchChips` 反射回调组件自己的 `getView`，在钩子里重入；`field()` 在第一个名字找不到时直接抛，
+  后面那句兜底是永远执行不到的死代码。现在钩子把 `chain.proceed()` 的返回值往下传，反射改走 `fieldOrNull`。
+- **百度搜索框下方快捷入口开关失效**（酒店 / 景点 / 美食 / 厕所 / 加油站）：同一排 chip 有两个宿主，都要挂 ——
+  首页收起态挂 `aihome.panel.presenter.QueryViewHolder` 构造器（那条 RecyclerView 没有资源 id，隐藏后还要向上收壳，否则留白）；
+  搜索页挂 `PoiListHeaderMenu` 的三个构造器，按 id 抓 `search_box_line2` / `search_box_line2_content`。
+  根因是 `aihome_poi_first_title` inflate 出来的那一刻那排还是空的，chip 是 `k()` 里再 `addView` 进去的，挂 inflate 永远抓空壳。
+- **百度路线页横幅广告**：RN 模板 `talos.view.advert.RNAdvertContainer` 与原生壳 `PubTravelBaseHomeCard.fetchAd/showAd` 双路断源。
+  只 GONE 广告容器会留约 1000 px 白块（壳里有宽度 0 的占位兄弟，`getChildCount()==1` 判据失效），判据改为「父容器没有别的可见孩子」并向上收 4 层。
+- **百度进地铁规划闪退**：穿山甲断点从 `TTAdSdk.init(Context, TTAdConfig)`（返回 false）改成 `TTAdSdk.start(TTAdSdk$Callback)`（空实现）。
+- **百度路线页浮层**：低碳、古今地图、周边、特惠打车等 15 个「创建即隐藏」锚点；最下方「探索周边」「特惠打车」拆成独立开关。
+
+### 变更
+
+- 百度地图锚点全表重测为 22.1.0（1660）的值：30 个 `NUM_*` 更新，`NUM_USER_CENTER` 从 `0` 补成 `0x7f0254eb`，新增 6 个搜索区锚点。
+- 百度地图 POI 支持按 13 个类型分别关闭（+ 长尾桶共 15 行开关），按 STY 里图标资源名过滤，缓存 schema `v8` → `v9`。
+- 拆掉全局 `TextView.setText` 钩子（每次设文本 4 次 `contains` + `toString()`，整机明显卡）。真机基线 416 帧 **0.00% janky**，50th 7ms / 99th 15ms。
+
+### 高德
+
+- 修复隐藏工具栏时连带隐藏「设置家 / 设置单位」。
+- 自动巡航灵敏度调整，跟随更及时。
+- 新增「自动抓取钩子」按钮：面板里一键跑锚点抓取，不用连电脑。
+- 新增日志抓取：面板里直接抓一段运行日志，方便反馈问题。
+
+### 产物
+
+- `Baidu-2.2.7-nonroot-embedded.apk`（228,755,944 B）
+- `Amap-2.2.7-nonroot-embedded.apk`（183,479,890 B）
+- `MapClean-lsp-v2.2.7.apk`（4,630,204 B）
+
+---
+
 ## v2.2.6（versionCode 2260）— 工具宫格回到原生、两行 10 个、版本号修正
 
 发布日期：2026-10-27。版本码：2260。基线 v2.2.5-step2（版本码 2252）。

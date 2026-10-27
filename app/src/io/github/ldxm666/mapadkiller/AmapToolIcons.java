@@ -112,6 +112,14 @@ final class AmapToolIcons {
      */
     static String imageOf(JSONObject item) {
         if (item == null) return "";
+        // 「工具图标统一彩绘（实验）」：优先取目录里的彩绘 PNG（iconV2/imageV2），
+        // 不再让 token 抢在前面；默认关闭时保持原有 token 优先的原生行为。
+        if (Config.toolColorIcon()) {
+            for (String key : new String[]{"iconV2", "imageV2", "imageUrlRender", "image"}) {
+                String value = first(item.optString(key));
+                if (value.startsWith("http://") || value.startsWith("https://")) return value;
+            }
+        }
         String url = "";
         for (String key : IMAGE_KEYS) {
             String value = first(item.optString(key));

@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """模块版裁剪（module prune）：把「免 root 内置版专属」的源码从**构建用的临时副本**里删掉。
 
@@ -37,10 +37,12 @@ MODULE_DROP = [
     "mapclean/FloatingController.java",
     "mapclean/FloatingHooks.java",
     "mapclean/GlassSlider.java",
-    "mapclean/AvatarAsset.java",
+    # AvatarAsset / GithubMark are kept: the module settings page shows the author
+    # avatar and the GitHub logo on its home/about tabs now.
     "mapclean/AvatarBadge.java",
-    "mapclean/GithubMark.java",
     "mapadkiller/AmapMineEntry.java",
+    # 百度版的长按「我的」入口：同样是内置版专属（模块模式用模块 App 的设置页）。
+    "mapclean/BaiduMineEntry.java",
 ]
 
 # 删除理由 + 依赖核实结论（写进构建日志，方便以后复核）
@@ -79,6 +81,10 @@ LINE_DROP = [
      r"FloatingHooks\.install\("),
     ("mapadkiller/AmapHooks.java",
      r"AmapMineEntry\.install\("),
+    ("mapclean/MainHook.java",
+     r"BaiduMineEntry\.install\("),
+    ("mapclean/App.java",
+     r"FloatingController\.refreshEnabled\("),
     ("mapclean/FloatingConfig.java",
      r"FloatingController\.setEnabled\("),
     ("mapclean/FloatingPanel.java",

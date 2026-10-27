@@ -105,6 +105,14 @@ final class AmapAlimama {
      * 两个目标方法都是 {@code void} ⇒ 短路只有一种正确写法：{@code return null}（不 proceed）。
      *
      * <p>不能"proceed 之后再返回"：请求已经在 {@code proceed} 里发出去了，拦截就没有意义。
+     *
+     * <p><b>2026-10-27 真机事故修复</b>：只 return 不回调 ⇒ 开屏永久卡死。
+     * 调用方 {@code zg5.run()} 拿到 {@code a76} 锁后把回调
+     * {@code com.autonavi.minimap.net.Callback} 传进来，**锁只在 onSuccess/onFailure 里释放**
+     * （{@code a76.m77b()}）。把请求吞掉就再也没有回调 ⇒ 锁永不释放 ⇒ 宿主一直停在
+     * SplashActivity（实测点图标 4 分钟不进首页）。所以短路后必须补一次
+     * {@code onFailure(request, null)}：Callback.onFailure 只做埋点 + 释放锁，不碰异常对象，
+     * 传 null 安全。
      */
     private static XposedInterface.Hooker block(final String label, final String endpoint) {
         return new XposedInterface.Hooker() {
@@ -118,9 +126,39 @@ final class AmapAlimama {
                     }
                 } catch (Throwable ignored) {
                 }
+                try {
+                    releaseCallback(chain.getArgs().toArray());
+                } catch (Throwable ignored) {
+                }
                 // 装上就无条件短路（安装期门控已决定装不装），拦截器里零 Config 读。
                 return null;
             }
         };
+    }
+
+    /**
+     * 补一次 {@code onFailure(AosRequest, AosResponseException)}：释放宿主开屏锁。
+     * 全反射调用，不依赖宿主类在编译期可见。
+     */
+    private static void releaseCallback(Object[] args) {
+        if (args == null || args.length == 0) return;
+        Object request = args[0];
+        for (Object a : args) {
+            if (a == null) continue;
+            java.lang.reflect.Method m = null;
+            try {
+                for (java.lang.reflect.Method cand : a.getClass().getMethods()) {
+                    if (!"onFailure".equals(cand.getName())) continue;
+                    Class<?>[] ps = cand.getParameterTypes();
+                    if (ps != null && ps.length == 2) { m = cand; break; }
+                }
+                if (m == null) continue;
+                m.setAccessible(true);
+                m.invoke(a, request, null);
+                H.log(Log.INFO, MainHook.TAG, "event=alimama_callback_released cb="
+                        + a.getClass().getName());
+            } catch (Throwable ignored) {
+            }
+        }
     }
 }

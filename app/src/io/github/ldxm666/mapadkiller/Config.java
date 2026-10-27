@@ -668,6 +668,19 @@ public final class Config {
         }
         return snapshot;
     }
+    /**
+     * 当前生效的全部配置（远端 → 本地 → 无 的合并结果）的只读副本。
+     * 给「主动抓包」写 txt 用：只读，不会触发后端重连。
+     */
+    public static Map<String, ?> snapshot() {
+        try {
+            Map<String, ?> v = currentValues();
+            return v == null ? new java.util.LinkedHashMap<String, Object>() : new java.util.LinkedHashMap<String, Object>(v);
+        } catch (Throwable t) {
+            return new java.util.LinkedHashMap<String, Object>();
+        }
+    }
+
     public static boolean visible(String key) { return value(currentValues(), key); }
     public static boolean selected(String key) { return Boolean.TRUE.equals(currentValues().get(key)); }
 

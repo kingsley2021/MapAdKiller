@@ -23,6 +23,25 @@ final class AmapPanel {
 
     static void apply(String key) { }
 
+
+
+    /** No 高德 config channel in this variant: nothing is writable through it. */
+    static int writePath() { return 0; }        // FloatingConfig.WRITE_NONE
+
+    static int effectiveBackend() { return 0; } // BACKEND_NONE
+
+    static int lastWriteState() { return 0; }
+
+    static boolean hasStored(String key) { return false; }
+
+    static int readInt(String key, int fallback) { return fallback; }
+
+    static boolean writeInt(String key, int value) { return false; }
+    /** No 高德 write path in this variant: nothing to report. */
+    static String lastWriteReason() { return null; }
+
+    /** 高德's strict read is not compiled in; report the safe default (visible). */
+    static boolean readStrict(String key) { return true; }
     /** Visible = do not touch the map; 高德's filter is not compiled into this variant. */
     static boolean mapPoiVisible() { return true; }
 }

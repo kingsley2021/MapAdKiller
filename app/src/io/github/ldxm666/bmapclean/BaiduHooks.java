@@ -18,6 +18,18 @@ import io.github.libxposed.api.XposedInterface;
 public final class BaiduHooks {
     private static final String DU = "com.baidu.baidumaps.duhelper.commute.";
     private static final Map<View,Integer> rowCounts = new WeakHashMap<>();
+    /** 搜索框快捷入口的开关状态只打一次日志，避免 getView 每次回调都刷屏。 */
+    private static final java.util.concurrent.atomic.AtomicBoolean sChipsLogged =
+            new java.util.concurrent.atomic.AtomicBoolean();
+    /**
+     * 搜索组件最近一次的 View。
+     *
+     * <p>为什么需要它：{@code getView} 是本模块**挂钩**的方法，任何地方再反射调它
+     * 都会重入钩子。onResume 需要拿 View 时就从这里取，取不到就这一轮不动 ——
+     * 宁可不隐藏，也绝不递归。
+     */
+    private static volatile java.lang.ref.WeakReference<View> sSearchRoot =
+            new java.lang.ref.WeakReference<View>(null);
     private static final java.util.Set<String> toolIdsLogged = new java.util.HashSet<>();
     /** 已回报给设置页的未知宫格文案（本进程内去重） */
     private static final java.util.Set<String> discoveredTools = new java.util.HashSet<>();
@@ -68,7 +80,11 @@ public final class BaiduHooks {
         hookAdSdkOnRequest(splash, cl);
         BaiduAdHooks.install(cl);
         BaiduPoiLayer.install(cl);
-        BaiduSearchAds.install(cl);
+        BaiduRoute.install(cl);
+            installSearchChipsInflate();
+            installPoiListChips(cl);
+            installHomeChips(cl);
+            BaiduSearchAds.install(cl);
         BaiduPanelHeight.install(cl);
         // BMAd 开放封装层在这里就挂（provider 类在 install 时已能解析，实测 voided=2）；
         // commonadprovider 的 ADN loader 走上面的懒挂载，见 hookAdSdkOnRequest。
@@ -85,14 +101,22 @@ public final class BaiduHooks {
         Class<?> searchEntry=H.cls(cl,"com.baidu.baidumaps.aihome.search.DefaultSearchUpUIComponent");
         hook(searchEntry,"getView",chain -> {
             Object result=chain.proceed();
-            if(result instanceof View)io.github.ldxm666.mapclean.EmbeddedSettings.bindEntry((View)result,MainHook.PKG_BMAP);
-            applySearchChips(chain.getThisObject());
+            if(result instanceof View) {
+                io.github.ldxm666.mapclean.EmbeddedSettings.bindEntry((View)result,MainHook.PKG_BMAP);
+                // 这里**绝不能**再反射调 getView —— 它就是当前被挂钩的方法。
+                // 2.2.7 第一次上机白屏就是这么来的：applySearchChips 内部 invoke("getView")
+                // ⇒ 重新进入本钩子 ⇒ 无限递归 ⇒ StackOverflowError 被 HookGuard 吞掉
+                // ⇒ 视图永远建不出来 ⇒ 整个首页白屏。直接把 proceed() 的返回值传下去。
+                sSearchRoot = new java.lang.ref.WeakReference<View>((View)result);
+                applySearchChips(chain.getThisObject(),(View)result);
+            }
             return result;
         });
         hook(searchEntry,"onResume",chain -> {
             Object result=chain.proceed();
             dumpSearchBinding(chain.getThisObject());   // TEMP probe
-            applySearchChips(chain.getThisObject());
+            View cached=sSearchRoot.get();
+            if(cached!=null) applySearchChips(chain.getThisObject(),cached);
             if(io.github.ldxm666.mapclean.EmbeddedSettings.enabledFor(MainHook.PKG_BMAP)) {
                 Object binding=field(chain.getThisObject(),"binding");
                 if(binding!=null)for(String slot:new String[]{"commonSearchBoxHome","searchBoxAnim"}) {
@@ -325,6 +349,22 @@ public final class BaiduHooks {
     static Object invoke(Object target,String name) throws Exception {
         if(target==null)return null;Method m=target.getClass().getMethod(name);return m.invoke(target);
     }
+    /**
+     * {@link #field} 的**静默版**：找不到就返回 null，绝不抛。
+     *
+     * <p>给「多个候选字段名逐个试」用。用 {@code field()} 写这种链是错的 ——
+     * 它在最后一个父类也找不到时会 throw，于是 {@code if (v == null) v = field(..., "另一个名字")}
+     * 这条回退**永远执行不到**，整段逻辑在第一句就没了（2.2.6 的
+     * {@code applySearchChips} 就是这么废掉的）。
+     */
+    static Object fieldOrNull(Object target,String name) {
+        if(target==null)return null;
+        for(Class<?> c=target.getClass();c!=null;c=c.getSuperclass())try {
+            Field f=c.getDeclaredField(name);f.setAccessible(true);return f.get(target);
+        }catch(NoSuchFieldException ignored){
+        }catch(Throwable ignored){return null;}
+        return null;
+    }
     static void hook(Class<?> c,String name,XposedInterface.Hooker hk,Class<?>...args){
         Method m=null;try{if(c!=null)m=c.getDeclaredMethod(name,args);}catch(Throwable ignored){}
         H.hook(m,"baidu_"+name+(c==null?"":c.getSimpleName()),hk);
@@ -460,17 +500,264 @@ public final class BaiduHooks {
      * `searchBoxCard` / `searchBoxLine`），字段名是 `searchBoxBinding`。第二行就是那排快捷入口，
      * 所以直接按槽位隐藏，不再猜结构。
      */
-    private static void applySearchChips(Object component) {
+    private static void applySearchChips(Object component, View root) {
+        dumpSearchTreeOnce(component, root);
         // 开关语义是"显示"，默认开 —— 只有用户主动关掉才会去动它。
-        if (Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ)) return;
+        boolean show = Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ);
+        // 每个进程只打一行。这条日志是「开关到底读没读到」的唯一现场证据：
+        // policy=shown 且 prefs=true  ⇒ 配置读到了，是用户没关；
+        // policy=shown 且 prefs=false ⇒ 远程配置根本没送到宿主进程（整页开关都会失效）。
+        if (sChipsLogged.compareAndSet(false, true)) {
+            H.log(Log.INFO, MainHook.TAG, "event=baidu_search_chips policy=" + (show ? "shown" : "hidden")
+                    + " prefs=" + (Cfg.prefs() != null));
+        }
+        if (show) return;
+        int hidden = 0;
         try {
-            Object binding = field(component, "searchBoxBinding");
-            if (binding == null) binding = field(component, "binding");
-            if (binding == null) return;
-            for (String slot : new String[]{"searchBoxLine2", "searchBoxLine", "searchBoxCard"}) {
-                Object v = field(binding, slot);
-                if (v instanceof View) hide((View) v);
+            // ① 按 binding 槽位。必须用 fieldOrNull：field() 在第一个名字找不到时
+            //    就抛，2.2.6 那句 `if (binding == null) binding = field(..., "binding")`
+            //    是**永远执行不到的死代码** —— 这就是「开关关了没反应」的直接原因。
+            Object binding = fieldOrNull(component, "searchBoxBinding");
+            if (binding == null) binding = fieldOrNull(component, "binding");
+            if (binding != null) for (String slot : new String[]{"searchBoxLine2", "searchBoxLine", "searchBoxCard"}) {
+                Object v = fieldOrNull(binding, slot);
+                if (v instanceof View) { hide((View) v); hidden++; }
             }
+        } catch (Throwable ignored) {}
+        // ② 按资源 id 兜底。那排是 Talos（Yoga 自绘），槽位名一旦被改就抓不到，
+        //    但 search_box_line2 / _content 的 id 从 22.0.0 到 22.1.0 一直没改名。
+        //    root 由调用方传入（getView 钩子里就是 proceed() 的结果），
+        //    这里不再反射取 view —— 那会重入本钩子。
+        try {
+            hidden += hideSearchLine2(root);
+        } catch (Throwable ignored) {}
+        if (hidden > 0 && Cfg.debug()) H.log(Log.INFO, MainHook.TAG, "event=baidu_search_chips_hidden n=" + hidden);
+    }
+
+    /**
+     * 首页搜索框所在的布局：{@code layout/aihome_poi_first_title} = 0x7f0e00c8。
+     *
+     * <p><b>为什么必须按布局 id 抓。</b>把 {@code res/RWD.xml}（也就是这个布局）
+     * 用二进制 AXML 解出来，结构是：
+     * <pre>
+     * ConstraintLayout @ll_first_title
+     *   └─ LinearLayout @search_box_container
+     *        ├─ ConstraintLayout @search_box_line1          ← 输入框那一行
+     *        ├─ LinearLayout     @search_box_loading_line
+     *        └─ LinearLayout     @search_box_line2          ← 要隐藏的那排快捷入口
+     *             ├─ View        @filter_top_line
+     *             └─ FrameLayout @search_box_line2_content
+     * </pre>
+     * 而 {@code DefaultSearchUpUIComponent} 的 binding 是
+     * {@code AihomeSearchUpUicomponentBindingImpl}，根视图只有 {@code mboundView0} ——
+     * 那排 chip **不在这棵树上**。之前按组件 getView 抓，抓的是一棵不含目标的树，
+     * 所以开关关了也永远没反应。这里改成「这个布局被 inflate 出来时抓它的根」。
+     */
+    private static final int LAYOUT_HOME_SEARCH_BOX = 0x7f0e00c8;
+
+    /**
+     * 挂 {@code LayoutInflater.inflate(int, ViewGroup, boolean)}：只要 inflate 的是
+     * 首页搜索框那个布局，就把第二行压掉。
+     *
+     * <p>两个参数的 {@code inflate(int, ViewGroup)} 内部会转调三参数版本，所以挂三参数
+     * 就能同时覆盖两种写法。代价是每次 inflate 多一次 int 比较 —— 可以忽略。
+     */
+        /**
+         * 搜索页（poi.newpoi）顶部那排 chip：美食 / 酒店 / 景点 / 厕所 / 公交站。
+         *
+         * <p><b>为什么挂这里。</b>DEX 实证（classes12.dex，按 `const vX, 0x7f0e00c8` 字节扫）：
+         * {@code aihome_poi_first_title} 全包只有三处 inflate，其中唯一带 parent 的是
+         * {@code PoiListHeaderMenu->k()}；{@code k()} 里再把 {@code layout/poilist_filter_view}
+         * （0x7f0e0d06）inflate 出来、{@code setTag("filter_container")}、
+         * {@code addView} 进 {@code search_box_line2_content}（0x7f02434b）。
+         *
+         * <p>也就是说：<b>inflate 那一刻这排是空的</b>，chip 是之后注入的。
+         * 之前挂 inflate 抓到的永远是空壳 —— 这就是「开关关了没反应」的根因，
+         * 不是时机没卡准，是抓错了对象。
+         *
+         * <p>挂构造器而不是挂 {@code k()}：三个构造器的最后一句都是调 {@code k()}，
+         * 挂构造器不依赖那个单字母方法名（R8 每版都会重排）。
+         */
+        /**
+         * 首页收起态那排 chip：酒店 / 景点 / 美食 / 厕所 / 加油站。
+         *
+         * <p><b>现场证据</b>：真机 dump 里这五个文案是
+         * {@code AppCompatTextView #7f020d0b bubbleTx}（id 名是复用的，别被名字骗），
+         * 父链 = 条目 LinearLayout → RecyclerView（<b>无 id</b>）→ FrameLayout →
+         * {@code CoordinatorLayout #7f021c8c front_frame} → persist_container。
+         *
+         * <p><b>为什么挂 ViewHolder 构造器</b>：那条 RecyclerView 没有资源 id，
+         * 唯一稳定又不刷屏的时机是「条目被创建」——一个条目建一次，
+         * 比挂 {@code RecyclerView.setAdapter}（全局热点，每次列表都走）便宜得多。
+         * 类 {@code aihome.panel.presenter.QueryViewHolder} 在 classes11.dex，
+         * 绑定方法是 {@code updateView(aihome.search.data.b)}，超类是 RecyclerView$ViewHolder。
+         */
+        private static void installHomeChips(ClassLoader cl) {
+            Class<?> vh = H.cls(cl, "com.baidu.baidumaps.aihome.panel.presenter.QueryViewHolder");
+            if (vh == null) {
+                H.log(Log.WARN, MainHook.TAG, "event=baidu_home_chips missing");
+                return;
+            }
+            int n = 0;
+            for (java.lang.reflect.Constructor<?> ctor : vh.getDeclaredConstructors()) {
+                if (H.hook(ctor, "baidu_home_chips", chain -> {
+                    Object r = chain.proceed();
+                    Object self = chain.getThisObject();
+                    try {
+                        java.lang.reflect.Method gv = self.getClass().getMethod("getView");
+                        Object v = gv.invoke(self);
+                        if (v instanceof View) {
+                            final View item = (View) v;
+                            item.post(new Runnable() {
+                                @Override public void run() { hideChipsRow(item); }
+                            });
+                        }
+                    } catch (Throwable ignored) {}
+                    return r;
+                })) n++;
+            }
+            H.log(Log.INFO, MainHook.TAG, "event=baidu_home_chips hooks=" + n);
+        }
+
+        /** androidx 不在模块编译期 classpath 上，只能按类名认。 */
+        private static boolean isRecycler(View v) {
+            return v != null && v.getClass().getName().equals("androidx.recyclerview.widget.RecyclerView");
+        }
+
+        /** 藏掉 chip 那条 RecyclerView，并向上收掉「只为它存在」的空壳（不收会留白）。 */
+        private static void hideChipsRow(View item) {
+            if (Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ)) return;
+            View cur = item;
+            android.view.ViewParent p = cur.getParent();
+            while (p instanceof View && !isRecycler((View) p)) {
+                cur = (View) p;
+                p = cur.getParent();
+            }
+            if (!(p instanceof View)) return;
+            View group = (View) p;
+            keepHidden(group);
+            for (int depth = 0; depth < 3; depth++) {
+                android.view.ViewParent vp = group.getParent();
+                if (!(vp instanceof android.view.ViewGroup)) break;
+                android.view.ViewGroup g = (android.view.ViewGroup) vp;
+                boolean others = false;
+                for (int i = 0; i < g.getChildCount(); i++) {
+                    View c = g.getChildAt(i);
+                    if (c != group && c.getVisibility() == View.VISIBLE) { others = true; break; }
+                }
+                if (others) break;
+                keepHidden(g);
+                group = g;
+            }
+            if (sChipsHidden.compareAndSet(false, true)) {
+                H.log(Log.INFO, MainHook.TAG, "event=baidu_home_chips_hidden");
+            }
+        }
+        private static void installPoiListChips(ClassLoader cl) {
+            Class<?> c = H.cls(cl, "com.baidu.baidumaps.poi.view.PoiListHeaderMenu");
+            if (c == null || !View.class.isAssignableFrom(c)) {
+                H.log(Log.WARN, MainHook.TAG, "event=baidu_poilist_chips missing");
+                return;
+            }
+            int n = 0;
+            for (java.lang.reflect.Constructor<?> ctor : c.getDeclaredConstructors()) {
+                if (H.hook(ctor, "baidu_poilist_chips", chain -> {
+                    Object r = chain.proceed();
+                    Object self = chain.getThisObject();
+                    if (self instanceof View) {
+                        final View v = (View) self;
+                        // 构造器末尾的 k() 已经把 chip 注入完；再 post 一次兜住延迟注入。
+                        hideSearchLine2(v);
+                        v.post(new Runnable() { @Override public void run() { hideSearchLine2(v); } });
+                    }
+                    return r;
+                })) n++;
+            }
+            H.log(Log.INFO, MainHook.TAG, "event=baidu_poilist_chips hooks=" + n);
+        }
+
+    private static void installSearchChipsInflate() {
+        hook(android.view.LayoutInflater.class, "inflate", chain -> {
+            Object result = chain.proceed();
+            try {
+                Object arg = chain.getArg(0);
+                if (arg instanceof Integer && ((Integer) arg).intValue() == LAYOUT_HOME_SEARCH_BOX
+                        && result instanceof View) {
+                    hideSearchLine2((View) result);
+                }
+            } catch (Throwable ignored) {}
+            return result;
+        }, int.class, android.view.ViewGroup.class, boolean.class);
+    }
+
+    /**
+     * 按资源 id 抓「搜索框下面那一栏」并隐藏。
+     *
+     * <p>{@code search_box_line2} 是搜索框第二行（那排快捷入口），
+     * {@code search_box_line2_content} 是它的内容容器 —— 两个都藏，
+     * 因为只藏外层时宿主仍可能把内层重新 attach 回来。
+     *
+     * @return 命中的控件数（0 = 这一版没有这个 id，调用方继续走别的兜底）
+     */
+    static int hideSearchLine2(View root) {
+        if (root == null) return 0;
+        // 开关语义是"显示"，默认开 —— 只有用户主动关掉才会去动它。
+        if (Spec.effectiveVisible(Spec.K_SEARCH_CHIPS, Spec.HOOK_READ)) return 0;
+        int n = 0;
+        View line2 = Anchors.find(root, Anchors.ID_SEARCH_LINE2, Anchors.NUM_SEARCH_LINE2);
+        if (line2 != null) { keepHidden(line2); n++; }
+        View content = Anchors.find(root, Anchors.ID_SEARCH_LINE2_CONTENT, Anchors.NUM_SEARCH_LINE2_CONTENT);
+        if (content != null && content != line2) { keepHidden(content); n++; }
+        if (n > 0 && sChipsHidden.compareAndSet(false, true)) {
+            H.log(Log.INFO, MainHook.TAG, "event=baidu_search_chips_hidden n=" + n);
+        }
+        return n;
+    }
+
+    /**
+     * 一次性把搜索区**真实**视图树打进 logcat（仅 debug_log 打开时，每进程一次）。
+     *
+     * <p>为什么需要：{@code uiautomator dump} 只给 {@code android.view.ViewGroup} 这种泛型类名，
+     * 而且很多节点根本不在无障碍树里；22.1.0 的首页搜索框又换了承载布局，
+     * 照旧名字找 {@code search_box_line2} 会一直落空。从进程内部 dump 才能看到
+     * 真实的类名 + 资源名 + 可见性，一次就能定位到该藏哪一个。
+     */
+    private static final java.util.concurrent.atomic.AtomicBoolean sTreeDumped =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    private static void dumpSearchTreeOnce(Object component, View root) {
+        // 这里刻意**不**看 Cfg.debug()：实测配置文件里 debug_log=true，
+        // 但钩子侧 Cfg.debug() 读到的是 false（RemotePreferences 在宿主进程里没刷新），
+        // 诊断就永远打不出来。改成只靠"每进程一次"限流，代价可控。
+        if (!sTreeDumped.compareAndSet(false, true)) return;
+        try { TreeDump.dump(root, "search_component"); } catch (Throwable ignored) {}
+        try {
+            H.log(Log.INFO, MainHook.TAG, "event=baidu_search_tree component="
+                    + (component == null ? "null" : component.getClass().getName()));
+        } catch (Throwable ignored) {}
+    }
+
+
+    private static final java.util.concurrent.atomic.AtomicBoolean sChipsHidden =
+            new java.util.concurrent.atomic.AtomicBoolean();
+
+    /**
+     * 藏住并且**保持**藏住。
+     *
+     * <p>宿主在布局完成、动画、下拉刷新时都会把这一行的可见性改回 VISIBLE，
+     * 只 GONE 一次等于没做（路线页那几个挂件实测就复发过）。
+     * 这里在控件自己的布局回调里再压一次 —— 监听只挂在这一两个控件上，不是全局钩子。
+     */
+    private static void keepHidden(final View v) {
+        if (v == null) return;
+        hide(v);
+        try {
+            v.addOnLayoutChangeListener(new View.OnLayoutChangeListener() {
+                @Override public void onLayoutChange(View x, int l, int t, int r, int b,
+                                                     int ol, int ot, int or, int ob) {
+                    if (x.getVisibility() != View.GONE) hide(x);
+                }
+            });
         } catch (Throwable ignored) {}
     }
 
@@ -498,8 +785,10 @@ public final class BaiduHooks {
             }
             H.log(Log.INFO, MainHook.TAG, sb.toString());
 
-            Object binding = field(component, "searchBoxBinding");
-            if (binding == null) binding = field(component, "binding");
+            // 用 fieldOrNull：旧写法 field() 在第一个名字找不到时就抛，
+            // 这条诊断从来没打印到 binding 一层，等于白挂。
+            Object binding = fieldOrNull(component, "searchBoxBinding");
+            if (binding == null) binding = fieldOrNull(component, "binding");
             if (binding == null) {
                 H.log(Log.INFO, MainHook.TAG, "probe: binding NOT FOUND by either name");
                 return;

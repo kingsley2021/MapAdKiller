@@ -31,13 +31,27 @@ public final class H {
     }
 
     public static void log(int priority, String tag, String msg) {
+        // 主动抓包：顺手抄进内存环形缓冲（10 分钟窗口），抓包中则同时写 txt。
+        // 只在内存里做，异常一律吞掉，绝不因为诊断功能影响宿主。
+        CaptureLog.note(priority, tag, msg);
         XposedModule m = module;
-        if (m != null) m.log(priority, tag, msg);
+        if (m != null) {
+            m.log(priority, tag, msg);
+        } else {
+            // 模块自己的设置页进程里 module 恒为 null。以前这里直接丢掉，
+            // 于是「抓取云数据」这类只在设置页执行的动作在 logcat 里完全不可见，
+            // 出问题只能靠猜。落到标准 Log 上，TAG 用 mainhook 的。
+            Log.println(priority, tag, msg);
+        }
     }
 
     public static void log(int priority, String tag, String msg, Throwable t) {
         XposedModule m = module;
-        if (m != null) m.log(priority, tag, msg, t);
+        if (m != null) {
+            m.log(priority, tag, msg, t);
+        } else {
+            Log.println(priority, tag, msg + " : " + t);
+        }
     }
 
     public static void log(String msg) {

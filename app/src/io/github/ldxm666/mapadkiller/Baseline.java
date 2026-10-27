@@ -84,6 +84,10 @@ public final class Baseline {
     private static final int MIN_FILES = 20;
     /** 检测到 main_page.xml 本次启动被写过之后，再等这么久让同批 prefs 落盘。 */
     private static final long SETTLE_MS = 5_000L;
+    /** 关键 prefs 齐全后，目录还要稳定这么久才算抓完（避免抓到一半就重启）。 */
+    private static final long STABLE_MS = 2_500L;
+    /** 等关键 prefs 齐全的上限：首启慢网/隐私弹窗都可能拖到十几秒。 */
+    private static final long MAX_SETTLE_MS = 40_000L;
     /** 等宿主 Context 的上限（onPackageReady 时 Application 可能还没创建）。 */
     private static final long CONTEXT_WAIT_MS = 20_000L;
     /** 失败重试次数上限：超过就放弃基线（保证模块不会永远 passthrough）。 */
@@ -124,6 +128,9 @@ public final class Baseline {
         try {
             final String version = moduleVersionName();
             final int code = moduleVersionCode();
+            // 每次模块加载都把「现在到底抓到没」回报给设置页（用户升级模块后第一次开高德，
+            // 首页那一行就能立刻对上，不用等他自己再点一次抓取）。
+            if (isMainProcess()) reportStateAsync(version, code);
             if (!baselineEnabled()) {
                 H.log(Log.INFO, TAG, "event=baseline_skip reason=disabled");
                 sCapturing = false;
@@ -141,25 +148,36 @@ public final class Baseline {
             final long recaptureAt = remoteRecaptureAt();
             final long handledAt = parseLong(state.getProperty(K_RECAPTURE_HANDLED), 0L);
             final boolean captured = "true".equals(state.getProperty(K_CAPTURED + code));
+            // 只要「抓完的时间」晚于「用户点抓取的时间」，这次请求客观上就已经被满足了。
+            // 之前只看 handled_at，只要它被任何一次隐式抓取写成 0，请求就永远 pending，
+            // 于是每次冷启动都判成抓取模式 —— 用户看到的正是「抓取成功但模块怎么都不生效」。
+            final long capturedAt = parseLong(state.getProperty(K_CAPTURED_AT), 0L);
+            final boolean requestSatisfied = recaptureAt <= 0L || handledAt >= recaptureAt
+                    || (captured && capturedAt >= recaptureAt);
+            // 面板「开始抓取 / 重新抓取」写入的显式采集模式（files/baseline/capture.mode）。
+            // 必须排在「已抓到就跳过」**前面**，否则已抓过的用户点「重新抓取」只会白重启两次、根本不重抓。
+            final File modeFile = captureModeFile();
+            final boolean userCapture = modeFile != null && modeFile.isFile();
 
-            if (captured && handledAt >= recaptureAt) {
+            if (!userCapture && captured && requestSatisfied) {
                 H.log(Log.INFO, TAG, "event=baseline_skip reason=captured v=" + version
                         + " code=" + code + " files=" + state.getProperty(K_FILES, "0"));
                 sCapturing = false;
                 return false;
             }
-            // 面板「开始抓取官方数据」写入的显式采集模式（files/baseline/capture.mode）：
-            // 用户主动点了就一直抓到成功为止，不受 attempt 次数限制。
-            final File modeFile = captureModeFile();
-            if (!captured && modeFile != null && modeFile.isFile()) {
+            // 用户主动点了「开始抓取 / 重新抓取」：一直抓到成功为止，不受 attempt 次数限制，
+            // 已抓过也要重抓一次（换城市 / 高德大版本更新后的标准入口）。
+            if (userCapture) {
                 if (isMainProcess()) {
                     state.setProperty(K_ATTEMPTS + code, "0");
+                    state.remove(K_GAVE_UP + code);
                     saveState(state);
+                    setCaptureRunning(true);
                     startWorker(version, code, recaptureAt);
                 }
                 sCapturing = true;
-                H.log(Log.INFO, TAG, "event=baseline_mode on reason=user_capture version=" + version
-                        + " code=" + code + " process=" + processName());
+                H.log(Log.INFO, TAG, "event=baseline_mode on reason=user_capture captured=" + captured
+                        + " version=" + version + " code=" + code + " process=" + processName());
                 return true;
             }
 
@@ -215,6 +233,29 @@ public final class Baseline {
 
     // ══════════════════════════════════════════════════════════════════ 后台抓取
 
+    /** 启动 4 秒后把当前基线状态广播给设置页（抓取会话自己会在结束时回报，这里跳过）。 */
+    private static void reportStateAsync(final String version, final int code) {
+        try {
+            Thread t = new Thread(new Runnable() {
+                @Override public void run() {
+                    try {
+                        sleep(4000L);
+                        if (sCapturing) return;
+                        Context ctx = waitHostContext(CONTEXT_WAIT_MS);
+                        if (ctx == null) return;
+                        Properties st = readState();
+                        boolean cap = st != null && "true".equals(st.getProperty(K_CAPTURED + code));
+                        int files = st == null ? 0 : (int) parseLong(st.getProperty(K_FILES), 0L);
+                        CaptureReport.attach(ctx);
+                        CaptureReport.send(ctx, CaptureReport.S_STATE, cap, files, version, null);
+                    } catch (Throwable ignored) { }
+                }
+            }, "mak-report-state");
+            t.setDaemon(true);
+            t.start();
+        } catch (Throwable ignored) { }
+    }
+
     private static void startWorker(final String version, final int code, final long recaptureAt) {
         try {
             Thread t = new Thread(new Runnable() {
@@ -239,6 +280,12 @@ public final class Baseline {
                 + " process=" + processName());
         Context ctx = waitHostContext(CONTEXT_WAIT_MS);
         if (ctx == null) throw new IllegalStateException("no_host_context");
+        CaptureReport.attach(ctx);
+        // 「用户主动点的抓取」= 面板写了 capture.mode，或面板/兜底文件写了 recapture 请求。
+        // 只在这条路上自动重启（用户刚点完按钮，重启是他预期的）；首次安装的隐式抓取只提示、
+        // 不杀进程，避免用户正开着导航时被打断。
+        final boolean explicit = (recaptureAt > 0L)
+                || (captureModeFile() != null && captureModeFile().isFile());
 
         File prefsDir = new File(ctx.getApplicationInfo().dataDir, "shared_prefs");
         File mainPage = new File(prefsDir, "main_page.xml");
@@ -258,25 +305,138 @@ public final class Baseline {
             H.log(Log.INFO, TAG, "event=baseline_home_ready file=main_page.xml wait_ms="
                     + (System.currentTimeMillis() - t0));
             sleep(SETTLE_MS);
+            // 首启时 shared_prefs 是陆续落盘的：只等 5 秒会抓到「首页有了、工具箱/云控还没写」的半套，
+            // 重启后就是图标不显示、家/单位不生效（真机 92 个文件 vs 完整 143 个）。这里等关键文件齐
+            // 且目录连续 STABLE_MS 没有新写入为止，最多 MAX_SETTLE_MS。
+            waitPrefsComplete(prefsDir);
         } else {
             fallback = true;
             H.log(Log.INFO, TAG, "event=baseline_home_timeout fallback_ms=" + FALLBACK_MS);
         }
 
         int files = capture(ctx, version, code, prefsDir, fallback);
-        if (fallback && files < MIN_FILES) {
-            // 首启闪退/极慢时 shared_prefs 还是空的：删掉半成品、不写 captured 标记，下次启动重来。
-            try {
-                deleteRecursively(new File(new File(ctx.getFilesDir(), DIR), version));
-            } catch (Throwable ignored) { }
+        // 关键文件不齐 = 这次抓的是半套（首启常见），一律不算成功，避免带着半套基线重启。
+        final boolean complete = keyFilesComplete(ctx, version);
+        if (!complete || (fallback && files < MIN_FILES)) {
+            final String reason = complete ? "fallback_thin" : "prefs_incomplete";
+            // ★ 只有「本来就没抓到过」才删半成品目录。
+            // 旧实现无条件 deleteRecursively(baseline/<ver>)：已经有一份好基线的用户点一次重抓、
+            // 恰好这次抓薄了，好基线就被连根删掉，之后永远显示未抓取 —— 这就是真机反馈的
+            // 「抓取云数据一直失败」。
+            final Properties st = readState();
+            final boolean hasGood = st != null && "true".equals(st.getProperty(K_CAPTURED + code));
+            if (!hasGood) {
+                try {
+                    deleteRecursively(new File(new File(ctx.getFilesDir(), DIR), version));
+                } catch (Throwable ignored) { }
+            }
             H.log(Log.WARN, TAG, "event=baseline_capture_retry files=" + files
-                    + " reason=fallback_thin version=" + version);
+                    + " reason=" + reason + " keep_good=" + hasGood + " version=" + version);
+            setCaptureRunning(false);
+            // 手动采集模式下薄基线不算成功：撤掉采集标记，避免下次启动无限重抓（用户可再点一次）。
+            try {
+                File mode = captureModeFile();
+                if (mode != null && mode.isFile()) mode.delete();
+            } catch (Throwable ignored) { }
+            // 请求也要「消费掉」：否则每次冷启动都判定 pending → 面板一请求就重启 → 抓取失败 →
+            // 又重启，用户眼里就是高德无限重启。失败原因回报给设置页，用户可再点一次。
+            if (recaptureAt > 0L) {
+                try {
+                    Properties s2 = st != null ? st : new Properties();
+                    s2.setProperty(K_RECAPTURE_HANDLED, String.valueOf(recaptureAt));
+                    s2.setProperty(K_FAIL_REASON, reason);
+                    saveState(s2);
+                } catch (Throwable ignored) { }
+            }
+            clearRecaptureRequest();
+            CaptureReport.send(ctx, CaptureReport.S_FAILED, hasGood, files, version, reason);
             return;
         }
         markCaptured(version, code, files, fallback, recaptureAt);
         H.log(Log.INFO, TAG, "event=baseline_capture_done files=" + files
                 + " version=" + version + " mode=" + (fallback ? "fallback" : "home")
                 + " cost_ms=" + (System.currentTimeMillis() - t0));
+        // 抓完了必须让设置页知道：宿主进程写不进 RemotePreferences（hook 侧只读），
+        // 只能走显式广播。设置页首页那一行就靠这条消息从「未抓取」变成「已抓取 N 项」。
+        CaptureReport.send(ctx, CaptureReport.S_DONE, true, files, version, null);
+        maybeAutoRestart(ctx, explicit, files);
+    }
+
+    /**
+     * 抓完之后的收尾：用户主动点的抓取 → 3 秒后自动重启宿主，回到「带 hook 的一次干净启动」；
+     * 首次安装的隐式抓取 → 只提示，不动进程（用户可能正在导航）。
+     */
+    private static void maybeAutoRestart(final Context ctx, boolean explicit, final int files) {
+        if (!isMainProcess()) return;
+        try {
+            if (explicit) {
+                io.github.ldxm666.mapclean.CaptureGate.toast(ctx,
+                        "✓ 官方数据已抓取完成（" + files + " 项）· 正在重启高德启用模块…");
+                new android.os.Handler(android.os.Looper.getMainLooper()).postDelayed(new Runnable() {
+                    @Override public void run() {
+                        try {
+                            io.github.ldxm666.mapclean.CaptureGate.restartHost(ctx);
+                        } catch (Throwable ignored) { }
+                    }
+                }, 3000L);
+                H.log(Log.INFO, TAG, "event=baseline_auto_restart files=" + files);
+            } else {
+                io.github.ldxm666.mapclean.CaptureGate.toast(ctx,
+                        "✓ 官方数据已抓取完成（" + files + " 项）· 重新打开高德即可启用模块");
+                H.log(Log.INFO, TAG, "event=baseline_restart_hint files=" + files);
+            }
+        } catch (Throwable t) {
+            H.log(Log.WARN, TAG, "event=baseline_restart_hint_failed err=" + t);
+        }
+    }
+
+    /** 等关键 prefs 齐 + 目录稳定；超时就让上层按「不完整」处理。 */
+    private static void waitPrefsComplete(File prefsDir) {
+        final long start = System.currentTimeMillis();
+        long lastChange = 0L;
+        long lastStamp = -1L;
+        while (System.currentTimeMillis() - start < MAX_SETTLE_MS) {
+            long stamp = 0L;
+            int missing = 0;
+            try {
+                for (String name : KEY_FILES) {
+                    File f = new File(prefsDir, name);
+                    if (!f.isFile()) missing++;
+                    else stamp = Math.max(stamp, f.lastModified());
+                }
+                File[] all = prefsDir.listFiles();
+                if (all != null) {
+                    for (File f : all) if (f != null) stamp = Math.max(stamp, f.lastModified());
+                }
+            } catch (Throwable ignored) { }
+            if (stamp != lastStamp) {
+                lastStamp = stamp;
+                lastChange = System.currentTimeMillis();
+            } else if (missing == 0 && System.currentTimeMillis() - lastChange >= STABLE_MS) {
+                H.log(Log.INFO, TAG, "event=baseline_prefs_complete wait_ms="
+                        + (System.currentTimeMillis() - start));
+                return;
+            }
+            sleep(500L);
+        }
+        H.log(Log.WARN, TAG, "event=baseline_prefs_timeout wait_ms="
+                + (System.currentTimeMillis() - start));
+    }
+
+    /** 抓下来的基线里关键文件是否齐全。 */
+    private static boolean keyFilesComplete(Context ctx, String version) {
+        try {
+            File keyDir = new File(new File(new File(ctx.getFilesDir(), DIR), version), "key");
+            for (String name : KEY_FILES) {
+                if (!new File(keyDir, name).isFile()) {
+                    H.log(Log.WARN, TAG, "event=baseline_incomplete missing=" + name);
+                    return false;
+                }
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
     }
 
     /** 真正做复制；返回复制的 prefs 文件数。 */
@@ -365,7 +525,22 @@ public final class Baseline {
         }
     }
 
+    /** 抓取进行中标记：面板靠它把通栏显示成「正在抓取」而不是「已抓到」。 */
+    private static void setCaptureRunning(boolean on) {
+        try {
+            File d = stateDir();
+            if (d == null) return;
+            File f = new File(d, "capture.running");
+            if (!on) {
+                if (f.isFile()) f.delete();
+                return;
+            }
+            if (!f.isFile()) f.createNewFile();
+        } catch (Throwable ignored) { }
+    }
+
     private static void markCaptured(String version, int code, int files, boolean fallback, long recaptureAt) {
+        setCaptureRunning(false);
         try {
             Properties p = readState();
             if (p == null) p = new Properties();
@@ -378,8 +553,15 @@ public final class Baseline {
             p.setProperty(K_FALLBACK, String.valueOf(fallback));
             p.setProperty(K_ATTEMPTS + code, "0");
             p.remove(K_FAILED + code);
-            p.setProperty(K_RECAPTURE_HANDLED, String.valueOf(recaptureAt));
+            // 只有「用户显式请求的那一次」才推进 handled_at；隐式抓取写 0 会把旧请求复活，
+            // 从而导致「抓到 → 重启 → 又判 pending → 再抓」的死循环（线上就是这么转圈）。
+            if (recaptureAt > 0L) p.setProperty(K_RECAPTURE_HANDLED, String.valueOf(recaptureAt));
             saveState(p);
+            // 抓完就撤掉采集模式标记：用户没看到弹窗、进程被杀，下次启动也不会无限重抓。
+            try {
+                File mode = captureModeFile();
+                if (mode != null && mode.isFile()) mode.delete();
+            } catch (Throwable ignored) { }
             // 面板靠这个空文件判断「已抓到」——写失败不影响抓取本身。
             // restart.pending 让冷启动这一次（hook 还没生效的会话）弹窗提示并自动重启，
             // 用户不用自己再手动杀一次进程。
@@ -412,6 +594,7 @@ public final class Baseline {
     }
 
     private static void fail(String version, int code, Throwable error) {
+        setCaptureRunning(false);
         int attempts = 0;
         try {
             Properties p = readState();
@@ -438,27 +621,60 @@ public final class Baseline {
      */
     public static boolean requestRecapture() {
         boolean ok = false;
+        sLastRequestError = null;
         try {
             io.github.libxposed.service.XposedService s = App.svc();
             if (s != null) {
                 SharedPreferences p = s.getRemotePreferences(PREF_GROUP);
                 ok = p.edit().putLong(K_RECAPTURE_AT, System.currentTimeMillis()).commit();
+                if (!ok) sLastRequestError = "write_remote_prefs_failed";
+            } else {
+                sLastRequestError = "service_not_bound";
             }
-        } catch (Throwable ignored) { }
-        // root 兜底：直接删掉宿主的 state 文件（LSPosed 用户必有 root）
-        try {
-            File st = new File(new File(new File("/data/data/com.autonavi.minimap"), "files"), DIR + "/" + STATE_FILE);
-            File am = new File(st.getParentFile(), ".attempt_v" + moduleVersionCode());
-            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", "rm -f '"
-                    + st.getAbsolutePath() + "' '" + am.getAbsolutePath() + "'"});
-            if (p.waitFor() == 0) ok = true;
-        } catch (Throwable ignored) { }
-        H.log(Log.INFO, TAG, "event=baseline_recapture_requested ok=" + ok);
+        } catch (Throwable t) {
+            sLastRequestError = "remote_prefs:" + t.getClass().getSimpleName();
+        }
+        // root 兜底：**只写一个请求文件，绝不删 state.properties**。
+        // 旧实现 `rm -f state.properties` 会把已经抓到的好基线标记一起删掉，一旦重抓失败
+        // 用户就永久没有基线（真机反馈「抓取一直失败」有一部分就是它）。
+        if (!ok) {
+            try {
+                File dir = new File(new File(new File("/data/data/com.autonavi.minimap"), "files"), DIR);
+                File req = new File(dir, "recapture.request");
+                String cmd = "mkdir -p '" + dir.getAbsolutePath() + "'"
+                        + " && date +%s > '" + req.getAbsolutePath() + "'"
+                        + " && chmod 666 '" + req.getAbsolutePath() + "'";
+                Process p = Runtime.getRuntime().exec(new String[]{"su", "-c", cmd});
+                if (p.waitFor() == 0) {
+                    ok = true;
+                    sLastRequestError = null;
+                } else if (sLastRequestError == null) {
+                    sLastRequestError = "su_denied";
+                }
+            } catch (Throwable t) {
+                if (sLastRequestError == null) sLastRequestError = "su_unavailable";
+            }
+        }
+        // 设置页进程里 H 类初始化会失败（没有 libxposed API），这里必须走 SafeLog：
+        // 之前就是这一句把已经写成功的请求打断，用户看到「请求失败」。
+        SafeLog.i(TAG, "event=baseline_recapture_requested ok=" + ok
+                + " err=" + sLastRequestError);
         return ok;
     }
 
-    /** 面板显示用：当前版本是否已抓到基线（hook 侧读 state 文件；App 侧走 root）。 */
+    /** 最近一次「请求重新抓取」失败的原因；成功或还没请求过返回 null。 */
+    public static String lastRequestError() {
+        return sLastRequestError;
+    }
+
+    /** 面板显示用：当前版本是否已抓到基线（先读 RemotePreferences 镜像，再读 state，最后 root）。 */
     public static boolean isCaptured() {
+        SharedPreferences rp = panelPrefs();
+        if (rp != null) {
+            try {
+                if (rp.getBoolean(K_CAPTURED + moduleVersionCode(), false)) return true;
+            } catch (Throwable ignored) { }
+        }
         try {
             Properties p = readState();
             if (p != null) return "true".equals(p.getProperty(K_CAPTURED + moduleVersionCode()));
@@ -473,6 +689,70 @@ public final class Baseline {
             return false;
         } catch (Throwable t) {
             return false;
+        }
+    }
+
+    /** 面板（模块 App 进程）读 RemotePreferences：hook 侧可读、App 侧经 LSPosed 服务读。 */
+    private static SharedPreferences panelPrefs() {
+        try {
+            io.github.libxposed.service.XposedService s = App.svc();
+            return s == null ? null : s.getRemotePreferences(PREF_GROUP);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 面板显示用：已抓到的配置文件数（读不到返回 0）。 */
+    public static int capturedFiles() {
+        SharedPreferences rp = panelPrefs();
+        if (rp != null) {
+            try {
+                int n = rp.getInt(K_FILES, 0);
+                if (n > 0) return n;
+            } catch (Throwable ignored) { }
+        }
+        try {
+            Properties p = readState();
+            if (p != null) return (int) parseLong(p.getProperty(K_FILES), 0L);
+        } catch (Throwable ignored) { }
+        return 0;
+    }
+
+    /** 面板显示用：基线抓取时间（0 = 不知道）。 */
+    public static long capturedAt() {
+        SharedPreferences rp = panelPrefs();
+        if (rp != null) {
+            try {
+                long t = rp.getLong(K_CAPTURED_AT, 0L);
+                if (t > 0L) return t;
+            } catch (Throwable ignored) { }
+        }
+        try {
+            Properties p = readState();
+            if (p != null) return parseLong(p.getProperty(K_CAPTURED_AT), 0L);
+        } catch (Throwable ignored) { }
+        return 0L;
+    }
+
+    /** hook 侧：面板是否请求了「重新抓取」且还没处理过。 */
+    public static boolean hasPendingRecapture() {
+        try {
+            long at = remoteRecaptureAt();
+            if (at <= 0L) return false;
+            Properties p = readState();
+            long handled = p == null ? 0L : parseLong(p.getProperty(K_RECAPTURE_HANDLED), 0L);
+            return at > handled;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    /** hook 侧：面板请求的时间戳（0 = 没请求）。 */
+    public static long pendingRecaptureAt() {
+        try {
+            return remoteRecaptureAt();
+        } catch (Throwable t) {
+            return 0L;
         }
     }
 
@@ -498,7 +778,7 @@ public final class Baseline {
             try {
                 File base = new File(new File("/data/data/com.autonavi.minimap/files"), DIR);
                 if (base.isDirectory() && base.canRead() && zipDir(base, target, DIR)) {
-                    H.log(Log.INFO, TAG, "event=baseline_export_done mode=direct path=" + target.getAbsolutePath());
+                    SafeLog.i(TAG, "event=baseline_export_done mode=direct path=" + target.getAbsolutePath());
                     return target.getAbsolutePath();
                 }
             } catch (Throwable ignored) { }
@@ -512,12 +792,12 @@ public final class Baseline {
             boolean ok = zipDir(tmp, target, DIR);
             deleteRecursively(tmp);
             if (ok) {
-                H.log(Log.INFO, TAG, "event=baseline_export_done mode=root path=" + target.getAbsolutePath());
+                SafeLog.i(TAG, "event=baseline_export_done mode=root path=" + target.getAbsolutePath());
                 return target.getAbsolutePath();
             }
             return null;
         } catch (Throwable t) {
-            H.log(Log.WARN, TAG, "event=baseline_export_failed", t);
+            SafeLog.w(TAG, "event=baseline_export_failed", t);
             return null;
         }
     }
@@ -569,6 +849,9 @@ public final class Baseline {
 
     private static final String TAG = MainHook.TAG;
 
+    /** 最近一次「请求重新抓取」失败的原因，面板用来显示（不参与控制逻辑）。 */
+    private static volatile String sLastRequestError;
+
     /** RemotePreferences（hook 侧只读；面板侧可写）。拿不到返回 null。 */
     private static SharedPreferences remotePrefs() {
         try {
@@ -582,13 +865,48 @@ public final class Baseline {
 
     /** 面板请求的「重新抓取」时间戳；0 = 没请求过。 */
     private static long remoteRecaptureAt() {
+        long at = 0L;
         try {
             SharedPreferences p = remotePrefs();
-            if (p == null) return 0L;
-            return p.getLong(K_RECAPTURE_AT, 0L);
+            if (p != null) at = p.getLong(K_RECAPTURE_AT, 0L);
+        } catch (Throwable ignored) { }
+        // root 兜底通道：面板 App 写不进 RemotePreferences 时会在宿主 files/baseline 下留
+        // 一个 recapture.request（内容是 unix 秒）。
+        try {
+            File dir = stateDir();
+            File req = dir == null ? null : new File(dir, "recapture.request");
+            if (req != null && req.isFile()) {
+                String txt = readSmallText(req);
+                long sec = parseLong(txt == null ? null : txt.trim(), 0L);
+                if (sec > 0L) at = Math.max(at, sec * 1000L);
+            }
+        } catch (Throwable ignored) { }
+        return at;
+    }
+
+    /** 读一个很小的文本文件（最多 256 字节），失败返回 null。 */
+    private static String readSmallText(File f) {
+        InputStream in = null;
+        try {
+            in = new FileInputStream(f);
+            byte[] buf = new byte[256];
+            int n = in.read(buf);
+            if (n <= 0) return null;
+            return new String(buf, 0, n, "UTF-8");
         } catch (Throwable t) {
-            return 0L;
+            return null;
+        } finally {
+            closeQuietly(in);
         }
+    }
+
+    /** 删掉 root 兜底请求文件（处理完就撤，避免每次启动都重抓）。 */
+    private static void clearRecaptureRequest() {
+        try {
+            File dir = stateDir();
+            File req = dir == null ? null : new File(dir, "recapture.request");
+            if (req != null && req.isFile()) req.delete();
+        } catch (Throwable ignored) { }
     }
 
     /**

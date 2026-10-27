@@ -6,10 +6,10 @@ public final class Version {
     private Version() {}
 
     /** 模块版本：与 module.prop、AndroidManifest 保持一致 */
-    public static final String NAME = "2.2.6";
+    public static final String NAME = "2.2.7";
     /** Full label shown in UI / module manager; the git tag uses the same string. */
-    public static final String LABEL = "2.2.6";
-    public static final int CODE = 2260;
+    public static final String LABEL = "2.2.7";
+    public static final int CODE = 2270;
 
     public static final String REPO = "https://github.com/ldxm666/MapAdKiller";
     public static final String RELEASES = REPO + "/releases/latest";
@@ -25,7 +25,7 @@ public final class Version {
      * 设置页会把它和**本机实际安装版本**并排显示（一致=✔，不一致=✘）。
      */
     public static final String[][] TARGETS = {
-            {"com.baidu.BaiduMap", "百度地图", "22.0.50"},
+            {"com.baidu.BaiduMap", "百度地图", "22.1.0"},
             {"com.autonavi.minimap", "高德地图", "17.02.0.1541"},
             {"com.tencent.map", "腾讯地图", "11.7.0"},
     };

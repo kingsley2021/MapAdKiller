@@ -44,6 +44,19 @@ public final class AmapData {
      */
     public static final int HOME_SLOTS = 10;
 
+    /**
+     * 「运营推广位」黑名单 —— 只影响这几个 id，其它 {@code tool_id_*} 目录工具一律不动。
+     *
+     * <p>313 = 优惠加油：云端 {@code tool_list_data} 的服务分类（cid9）里常驻（29 项中第 16 项，
+     * 带红色「领油券」角标），用户在「更多工具」里能随时再选回首页。它的 {@code tool_id_313}
+     * 在 default_config.json 里是 {@code null}，面板按默认值画成「关」，而
+     * {@link #toolKeep} 以前把「未设置」当透传放行 ⇒ UI 说关、代码放行，这就是「优惠加油
+     * 很顽固」的根因。
+     */
+    private static final java.util.Set<String> PROMO_TOOLS =
+            java.util.Collections.unmodifiableSet(new java.util.HashSet<String>(
+                    java.util.Arrays.asList("313")));
+
     /** 15.21 专用分支开关（由 AmapMine1521.install 置位；17.02 永远 false）。 */
     public static volatile boolean IS_1521 = false;
 
@@ -160,9 +173,12 @@ public final class AmapData {
             //   之前用 s.selected(key) 要求「显式打开才保留」，导致配置里没有记录的工具
             //   （包括宿主自己给的）全被剔掉，首页只剩「更多工具」一个格子。
             Boolean explicit = Config.explicit(key);
-            boolean kept = explicit == null || explicit.booleanValue();
+            // ★ 未设置时按「面板显示的默认值」处理：推广位（313 优惠加油）默认关，
+            //   其余目录工具保持透传，避免历史事故「加了工具但首页不增加」。
+            boolean kept = explicit != null ? explicit.booleanValue() : !PROMO_TOOLS.contains(id);
             reportKeep(id, key, kept,
-                    kept ? (explicit == null ? "pass_through" : "user_selected") : "switch_off");
+                    kept ? (explicit == null ? "pass_through" : "user_selected")
+                         : (explicit == null ? "promo_default_off" : "switch_off"));
             return kept;
         }
         boolean kept = s.enabled(key);
@@ -291,6 +307,7 @@ public final class AmapData {
     public static String storage(String key, String raw, Settings s) throws Exception {
         if (raw == null || raw.length() == 0) return raw;
         if ("local_tool_list_for_xml_v2".equals(key)) return toolbox(new JSONObject(raw), s).toString();
+        if ("tool_list_data".equals(key)) return catalog(raw, s);
         if (!"recommendTools".equals(key) && !"aosRecommendTools".equals(key)
                 && !"choiceTools".equals(key)) return raw;
         JSONObject out = new JSONObject(raw);
@@ -306,6 +323,56 @@ public final class AmapData {
         out.put(listKey, kept);
         return out.toString();
     }
+
+    /**
+     * 过滤云端「更多工具」目录 {@code tool_list_data}（120 KB 分类 JSON）。
+     *
+     * <p>这是 313 的**第二个口子**：页面从 {@code AjxModuleLocalStorage#getItemSync("toolbox",
+     * "tool_list_data")} 整包读走，再渲染 6 个分类；{@code storage()} 以前对这个 key 走 default
+     * 分支原样返回，于是 313 永远在候选列表里，随时能被再选回首页。
+     *
+     * <p>只剔 {@link #PROMO_TOOLS}，且用户显式打开 {@code tool_id_313} 时仍然保留；其它分类、
+     * 其它字段一个字节都不动（无改动直接返回原串）。
+     */
+    public static String catalog(String raw, Settings s) {
+        if (raw == null || raw.length() == 0 || raw.length() > 4 * 1024 * 1024) return raw;
+        if (raw.equals(CATALOG_IN)) return CATALOG_OUT;
+        try {
+            JSONObject src = new JSONObject(raw);
+            JSONArray cats = src.optJSONArray("category");
+            if (cats == null) return raw;
+            int removed = 0;
+            for (int i = 0; i < cats.length(); i++) {
+                JSONObject cat = cats.optJSONObject(i);
+                JSONArray tools = cat == null ? null : cat.optJSONArray("tools");
+                if (tools == null || tools.length() == 0) continue;
+                JSONArray kept = new JSONArray();
+                for (int j = 0; j < tools.length(); j++) {
+                    JSONObject tool = tools.optJSONObject(j);
+                    String id = tool == null ? null : tool.optString("id");
+                    if (id != null && PROMO_TOOLS.contains(id)
+                            && !s.selected(AmapToolCatalog.key(id))) {
+                        removed++;
+                        continue;
+                    }
+                    kept.put(tools.opt(j));
+                }
+                if (kept.length() != tools.length()) cat.put("tools", kept);
+            }
+            if (removed == 0) return raw;
+            String out = src.toString();
+            CATALOG_IN = raw;
+            CATALOG_OUT = out;
+            H.log("event=amap_catalog_filter removed=" + removed);
+            return out;
+        } catch (Throwable t) {
+            return raw;   // 解析失败原样放行，绝不把「更多工具」页搞崩
+        }
+    }
+
+    /** {@link #catalog} 的单槽缓存（云端刷新才会换串，命中率接近 100%）。 */
+    private static volatile String CATALOG_IN;
+    private static volatile String CATALOG_OUT;
 
     /** Filter-only form: keep the app's own slots, drop the ones switched off. */
     public static JSONObject toolbox(JSONObject source, Settings s) throws Exception {
@@ -362,7 +429,7 @@ public final class AmapData {
                 present.add(entry[0]);
             }
         }
-        if (count == kept.size() && extra.isEmpty()) return source;
+        if (count == kept.size() && extra.isEmpty() && !Config.toolColorIcon()) return source;
 
         JSONObject out = new JSONObject(source.toString());
         int cells = fill ? (maxSlots <= 0 ? Math.max(count, kept.size() + extra.size())
@@ -382,6 +449,7 @@ public final class AmapData {
         }
         if (kept.isEmpty() && extra.isEmpty()) out.put("king_switch", "0");
         moveMoreToolsLast(out);
+        applyColorIcons(out, null);
         return out;
     }
 
@@ -532,10 +600,8 @@ public final class AmapData {
             for (int i = 0; i < HOME_SLOTS; i++) {
                 String id = out.optString("id" + i);
                 if (id.length() == 0) continue;
-                JSONObject item = host.get(id);
-                if (item == null) continue;
-                String icon = item.optString("iconV2", item.optString("imageV2", ""));
-                if (icon.length() == 0 || icon.startsWith("@")) continue;
+                String icon = colorIconUrl(id, host);
+                if (icon.length() == 0) continue;
                 out.put("imageUrlRender" + i, icon);
                 out.remove("imageToken" + i);
                 out.remove("imageClass" + i);
@@ -544,6 +610,31 @@ public final class AmapData {
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    /** 彩绘图标 URL：宿主目录 iconV2 → 静态目录 iconV2 → k84.f() 默认槽位 imageUrlRender。 */
+    private static String colorIconUrl(String id, java.util.Map<String, JSONObject> host) {
+        try {
+            JSONObject item = host == null ? null : host.get(id);
+            if (item != null) {
+                String icon = item.optString("iconV2", item.optString("imageV2", ""));
+                if (isHttp(icon)) return icon;
+            }
+            for (String[] entry : AmapToolCatalog.ENTRIES) {
+                if (id.equals(entry[0]) && entry.length > 4 && isHttp(entry[4])) return entry[4];
+            }
+            JSONObject def = defaultSlot(id);
+            if (def != null) {
+                String url = def.optString("imageUrlRender");
+                if (isHttp(url)) return url;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    private static boolean isHttp(String value) {
+        return value != null && (value.startsWith("http://") || value.startsWith("https://"));
     }
 
     /**

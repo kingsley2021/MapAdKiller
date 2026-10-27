@@ -1,6 +1,7 @@
 package io.github.ldxm666.mapclean;
 
 import io.github.ldxm666.mapadkiller.App;
+import io.github.ldxm666.mapadkiller.CaptureLog;
 import io.github.ldxm666.mapadkiller.Config;
 import io.github.ldxm666.mapadkiller.LearnedProvider;
 import io.github.ldxm666.mapadkiller.MainHook;
@@ -1329,6 +1330,31 @@ public final class MainActivity extends Activity {
                 addNoteRow(sec.card, "高德工具列表隐藏后自动补位；旧版实验性坐标重排已移除。");
                 addSwitch(sec.card, "调试日志（框架输出协议适配错误）", Config.K_DEBUG_LOG);
             }
+            addActionButton(sec.card, "抓取前 10 分钟（立即生成 txt）", new Runnable() {
+                @Override public void run() {
+                    toast("正在导出最近十分钟的数据…");
+                    String path = null;
+                    try {
+                        path = CaptureLog.dumpRecent(MainActivity.this);
+                    } catch (Throwable t) {
+                        android.util.Log.w("MapCleanEmbedded", "event=capture_dump_fail err="
+                                + t.getClass().getName());
+                    }
+                    toast(path != null ? "已保存：" + path : "导出失败：系统拒绝写文件，见 logcat");
+                }
+            });
+            addActionButton(sec.card, CaptureLog.running()
+                    ? "正在抓取最近十分钟的数据…（点此结束）" : "抓取后 10 分钟（从现在开始录）",
+                    new Runnable() {
+                @Override public void run() {
+                    boolean started = CaptureLog.toggleLive(MainActivity.this);
+                    toast(started ? "正在抓取最近十分钟的数据…" : "已结束抓包，txt 已生成");
+                }
+            });
+            addNoteRow(sec.card, "「前 10 分钟」立刻导出已经发生的事（只含这次打开高德以后的），"
+                    + "「后 10 分钟」从这一刻开始录。"
+                    + "两份 txt 都存到「内部存储/下载/MapClean/」，文件管理器点「下载」就能看到；"
+                    + "系统不给写时自动落到 Android/data/包名/files/MapClean/。");
             toggle(sec);
             Sec sec2 = newDrawer("去广告说明");
             addNoteRow(sec2.card, "高德使用版本专用协议适配；推荐内容由高德页的开关控制。百度、腾讯保留原有广告兼容规则和 SDK 清单。");
@@ -1764,6 +1790,7 @@ public final class MainActivity extends Activity {
             statusView.setText(l1 + "　·　" + l2);
         }
         refreshMetrics();
+        refreshDiagRows();
     }
 
     private String lastStatusSig;
@@ -2736,6 +2763,15 @@ public final class MainActivity extends Activity {
         update.addView(updateRow, skin.matchWrap());
         root.addView(update, withTop(skin, Skin.S3));
 
+        // 数据与日志（v2.2.6）：抓取云数据 / 运行日志，首页直达
+        skin.addSection(root, "数据与日志");
+        LinearLayout diag = skin.listCard();
+        diag.addView(cloudDataRow());
+        diag.addView(skin.hairline());
+        diag.addView(logRow());
+        root.addView(diag, skin.matchWrap());
+        loadCloudState();
+
         // 应用入口
         skin.addSection(root, "应用");
         LinearLayout apps = skin.listCard();
@@ -2766,6 +2802,556 @@ public final class MainActivity extends Activity {
         adLine.setVisibility(View.GONE);
         renderVersionLines();
         return sv;
+    }
+
+    // ══════════════════════════════════════════════════ 首页 · 数据与日志（v2.2.6）
+
+    /**
+     * 云数据状态缓存。模块版（LSPosed）读不到宿主 UID 的 files/baseline、也没有 root 兜底，
+     * 状态由宿主进程发广播回来，落在本 App 的 {@code capture_report} prefs 里
+     * （见 {@code mapadkiller.CaptureReport}）。心跳里只读这份内存缓存，不碰磁盘。
+     */
+    private boolean cloudDone;
+    private int cloudFileCount;
+    private boolean cloudStateKnown;
+    /** 面板已请求抓取、还没等到宿主回报结果。 */
+    private boolean cloudPending;
+    /** 上次抓取失败原因（宿主的 baseline_capture_retry 原因码）。 */
+    private String cloudError;
+    /** 上次抓取完成时间。 */
+    private long cloudAt;
+    private TextView cloudSub;
+    private TextView logSub;
+
+    /** 「抓取云数据」一行：官方云端下发的首页卡片 / 金刚位 / 工具宫格 / 云控开关，按版本抓一份基线。 */
+    private LinearLayout cloudDataRow() {
+        LinearLayout row = skin.row();
+        row.addView(iconTile(Icon.DOWNLOAD, skin.accent, skin.accentSoft), fixed(skin, 38, 38));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(skin.rowTitle("抓取云数据"));
+        cloudSub = skin.text("读取状态…", Skin.T_CAPTION, Skin.REGULAR, skin.text2);
+        cloudSub.setSingleLine(true);
+        cloudSub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams slp = skin.matchWrap();
+        slp.topMargin = skin.dp(2);
+        box.addView(cloudSub, slp);
+
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        blp.leftMargin = skin.dp(12);
+        row.addView(box, blp);
+        row.addView(new Icon(this, Icon.CHEVRON, skin.text3), fixed(skin, 18, 18));
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { startCloudCapture(); }
+        });
+        UiKit.pressable(row, 0.99f);
+        return row;
+    }
+
+    /** 「运行日志」一行：进程内环形缓冲（最近 10 分钟）查看 / 复制 / 导出 txt。 */
+    private LinearLayout logRow() {
+        LinearLayout row = skin.row();
+        row.addView(iconTile(Icon.ARCHIVE, skin.accent, skin.accentSoft), fixed(skin, 38, 38));
+
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.addView(skin.rowTitle("运行日志"));
+        logSub = skin.text("点此查看 / 导出运行日志", Skin.T_CAPTION, Skin.REGULAR, skin.text2);
+        logSub.setSingleLine(true);
+        logSub.setEllipsize(android.text.TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams slp = skin.matchWrap();
+        slp.topMargin = skin.dp(2);
+        box.addView(logSub, slp);
+
+        LinearLayout.LayoutParams blp = new LinearLayout.LayoutParams(
+                0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
+        blp.leftMargin = skin.dp(12);
+        row.addView(box, blp);
+        row.addView(new Icon(this, Icon.CHEVRON, skin.text3), fixed(skin, 18, 18));
+
+        row.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) { showLogDialog(); }
+        });
+        UiKit.pressable(row, 0.99f);
+        return row;
+    }
+
+    /** 心跳里只改文案，不碰磁盘 / 不起进程。 */
+    private void refreshDiagRows() {
+        try {
+            if (cloudSub != null) {
+                if (!embedded()) readCaptureReport();
+                String text;
+                if (embedded() && CaptureGate.capturing(this)) {
+                    text = "正在抓取官方云端数据…";
+                } else if (!cloudStateKnown) {
+                    text = "读取状态…";
+                } else if (embedded() && cloudDone) {
+                    text = "已抓取" + (cloudFileCount > 0 ? " " + cloudFileCount + " 个配置文件" : "本版本基线")
+                            + " · 点此重新抓取";
+                } else if (!embedded() && cloudPending) {
+                    text = "已请求抓取 · 打开高德后自动开始";
+                } else if (cloudDone) {
+                    text = "已抓取" + (cloudFileCount > 0 ? " " + cloudFileCount + " 个配置文件" : "本版本基线")
+                            + (cloudAt > 0L ? " · " + timeText(cloudAt) : "")
+                            + " · 点此重新抓取";
+                } else if (cloudError != null && cloudError.length() > 0) {
+                    text = "上次没抓全（" + reasonText(cloudError) + "）· 点此重试";
+                } else {
+                    text = "未抓取 · 点此抓取官方云端数据";
+                }
+                if (!text.contentEquals(cloudSub.getText())) cloudSub.setText(text);
+            }
+            if (logSub != null) {
+                int n = 0;
+                try { n = CaptureLog.recentCount(); } catch (Throwable ignored) { }
+                String text = n > 0
+                        ? "最近 " + n + " 条事件 · 点此查看"
+                        : "点此查看 / 导出运行日志";
+                if (!text.contentEquals(logSub.getText())) logSub.setText(text);
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * 读一次云数据状态。
+     *
+     * <p>内置版：与宿主同进程同 UID，直接读 {@code files/baseline}。
+     * <p>模块版：跨 UID，宿主的 state 文件读不到（模块 App 也不在 KernelSU 白名单，{@code su} 静默失败），
+     * 只能读宿主抓完/失败时广播回来的 {@code capture_report}。旧实现只调
+     * {@code Baseline.isCaptured()}，永远返回 false —— 首页就一直显示「未抓取」，
+     * 用户当然认为「抓取一直失败」。
+     */
+    private void loadCloudState() {
+        if (embedded()) {
+            try {
+                cloudDone = CaptureGate.captured(this);
+                cloudFileCount = CaptureGate.capturedFiles(this);
+            } catch (Throwable ignored) { }
+            cloudStateKnown = true;
+            refreshDiagRows();
+            return;
+        }
+        readCaptureReport();
+        cloudStateKnown = true;
+        refreshDiagRows();
+        if (cloudDone) return;
+        // 本机还没收到过任何回报（比如模块刚更新）：再用权威接口确认一次，和广播结果取并集。
+        new Thread(new Runnable() {
+            @Override public void run() {
+                boolean ok = false;
+                int files = 0;
+                try {
+                    ok = io.github.ldxm666.mapadkiller.Baseline.isCaptured();
+                    if (ok) files = io.github.ldxm666.mapadkiller.Baseline.capturedFiles();
+                } catch (Throwable ignored) { }
+                final boolean done = ok;
+                final int n = files;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() {
+                        if (done && !cloudDone) {
+                            cloudDone = true;
+                            if (n > 0) cloudFileCount = n;
+                        }
+                        cloudStateKnown = true;
+                        refreshDiagRows();
+                    }
+                });
+            }
+        }, "mapclean-cloud-state").start();
+    }
+
+    /** 把宿主广播回来的抓取状态读进内存字段（SharedPreferences 有内存缓存，心跳里读也便宜）。 */
+    private void readCaptureReport() {
+        try {
+            android.content.SharedPreferences sp = getSharedPreferences(
+                    io.github.ldxm666.mapadkiller.CaptureReport.P, MODE_PRIVATE);
+            boolean known = sp.getBoolean(io.github.ldxm666.mapadkiller.CaptureReport.K_KNOWN, false);
+            if (!known) return;
+            String stage = sp.getString(io.github.ldxm666.mapadkiller.CaptureReport.K_STAGE, null);
+            boolean captured = sp.getBoolean(io.github.ldxm666.mapadkiller.CaptureReport.K_CAPTURED, false);
+            if (io.github.ldxm666.mapadkiller.CaptureReport.S_DONE.equals(stage)
+                    || io.github.ldxm666.mapadkiller.CaptureReport.S_STATE.equals(stage)
+                    || io.github.ldxm666.mapadkiller.CaptureReport.S_FAILED.equals(stage)) {
+                if (captured) {
+                    cloudDone = true;
+                    cloudFileCount = sp.getInt(io.github.ldxm666.mapadkiller.CaptureReport.K_FILES, cloudFileCount);
+                    long at = sp.getLong(io.github.ldxm666.mapadkiller.CaptureReport.K_AT, 0L);
+                    if (at > 0L) cloudAt = at;
+                    cloudError = null;
+                    cloudPending = false;
+                } else if (io.github.ldxm666.mapadkiller.CaptureReport.S_FAILED.equals(stage)
+                        || io.github.ldxm666.mapadkiller.CaptureReport.S_STATE.equals(stage)) {
+                    cloudError = sp.getString(io.github.ldxm666.mapadkiller.CaptureReport.K_ERROR, null);
+                    cloudPending = false;
+                    if (io.github.ldxm666.mapadkiller.CaptureReport.S_FAILED.equals(stage)) cloudDone = false;
+                }
+            } else if (io.github.ldxm666.mapadkiller.CaptureReport.S_PENDING.equals(stage)) {
+                // 「已请求、等宿主回报」：即便手里还有上一次的成功结果，也要先显示等待中。
+                cloudPending = true;
+            }
+        } catch (Throwable ignored) { }
+    }
+
+    /** 抓取时间显示：「今天 14:32」/「10-27 14:32」。 */
+    private String timeText(long at) {
+        try {
+            java.util.Calendar c = java.util.Calendar.getInstance();
+            java.util.Calendar t = java.util.Calendar.getInstance();
+            t.setTimeInMillis(at);
+            String hm = new java.text.SimpleDateFormat("HH:mm", java.util.Locale.getDefault()).format(new java.util.Date(at));
+            boolean today = c.get(java.util.Calendar.YEAR) == t.get(java.util.Calendar.YEAR)
+                    && c.get(java.util.Calendar.DAY_OF_YEAR) == t.get(java.util.Calendar.DAY_OF_YEAR);
+            if (today) return "今天 " + hm;
+            return new java.text.SimpleDateFormat("MM-dd ", java.util.Locale.getDefault()).format(new java.util.Date(at)) + hm;
+        } catch (Throwable ignored) {
+            return "";
+        }
+    }
+
+    /** 抓取失败原因 → 人话。 */
+    private String reasonText(String code) {
+        if (code == null) return "未知原因";
+        if (code.contains("prefs_incomplete")) return "高德启动太慢，配置没写完";
+        if (code.contains("fallback_thin")) return "没等到首页，抓到的配置太少";
+        if (code.contains("no_host_context")) return "高德进程还没起来";
+        if (code.contains("timeout")) return "等待超时";
+        return code;
+    }
+
+    /** 本地记一条「已请求抓取」，等宿主的广播回来后覆盖成真正的结果。 */
+    private void markCapturePending() {
+        try {
+            getSharedPreferences(io.github.ldxm666.mapadkiller.CaptureReport.P, MODE_PRIVATE)
+                    .edit()
+                    .putBoolean(io.github.ldxm666.mapadkiller.CaptureReport.K_KNOWN, true)
+                    .putString(io.github.ldxm666.mapadkiller.CaptureReport.K_STAGE,
+                            io.github.ldxm666.mapadkiller.CaptureReport.S_PENDING)
+                    .putBoolean(io.github.ldxm666.mapadkiller.CaptureReport.K_CAPTURED, cloudDone)
+                    .putLong(io.github.ldxm666.mapadkiller.CaptureReport.K_AT, System.currentTimeMillis())
+                    .commit();
+        } catch (Throwable ignored) { }
+    }
+
+    /**
+     * 把高德拉到前台：进程没起来就是干净的一次启动（冷启动会直接进入采集），
+     * 进程还活着则由 {@code CaptureGate.applyRecaptureRequest} 在 onResume 写下采集标记
+     * 并提示用户「关掉高德再打开一次」。
+     *
+     * <p>直接 {@code startActivity} 在部分 ROM（HyperOS 等）会被「链式启动 / 后台弹出界面」
+     * 的 {@code ConfirmStartActivity} 确认框拦一道，所以同时排一个几秒后的系统闹钟拉起启动页，
+     * 和内置版 {@code CaptureGate.restartHost} 用的是同一招。
+     */
+    /**
+     * root 直启：{@code su -c am start} 是 shell 身份，不受 HyperOS「链式启动 /
+     * 后台弹出界面」那个 {@code ConfirmStartActivity} 确认框拦截。真机上之前的
+     * startActivity 全被那个框吃掉，用户看到的就是「点了抓取，什么都没发生」。
+     */
+    private static int sRootLaunch = -1; // -1 未知 / 0 不可用 / 1 可用
+
+    private boolean launchHostByRoot() {
+        if (sRootLaunch == 0) return false;
+        try {
+            Process p = Runtime.getRuntime().exec(new String[]{"su", "-c",
+                    "am start -n com.autonavi.minimap/com.autonavi.map.activity.SplashActivity"});
+            boolean done = p.waitFor(6, java.util.concurrent.TimeUnit.SECONDS);
+            int rc = done ? p.exitValue() : -1;
+            if (!done) try { p.destroy(); } catch (Throwable ignored) { }
+            if (rc == 0) {
+                sRootLaunch = 1;
+                io.github.ldxm666.mapadkiller.SafeLog.i(io.github.ldxm666.mapadkiller.MainHook.TAG,
+                        "event=cloud_launch root ok");
+                return true;
+            }
+            if (rc == 1) sRootLaunch = 0;
+            io.github.ldxm666.mapadkiller.SafeLog.w(io.github.ldxm666.mapadkiller.MainHook.TAG,
+                    "event=cloud_launch root failed rc=" + rc);
+        } catch (Throwable t) {
+            sRootLaunch = 0;
+            io.github.ldxm666.mapadkiller.SafeLog.w(io.github.ldxm666.mapadkiller.MainHook.TAG,
+                    "event=cloud_launch root failed " + t);
+        }
+        return false;
+    }
+
+    private void launchHost() {
+        try {
+            if (launchHostByRoot()) return;
+            android.content.Intent i = getPackageManager().getLaunchIntentForPackage("com.autonavi.minimap");
+            if (i == null) {
+                toast("没找到高德地图，请手动打开一次");
+                io.github.ldxm666.mapadkiller.SafeLog.w(io.github.ldxm666.mapadkiller.MainHook.TAG, "event=cloud_launch no_launch_intent");
+                return;
+            }
+            i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                    | android.content.Intent.FLAG_ACTIVITY_CLEAR_TOP);
+            try {
+                startActivity(i);
+                io.github.ldxm666.mapadkiller.SafeLog.i(io.github.ldxm666.mapadkiller.MainHook.TAG, "event=cloud_launch direct ok");
+            } catch (Throwable t) {
+                io.github.ldxm666.mapadkiller.SafeLog.w(io.github.ldxm666.mapadkiller.MainHook.TAG, "event=cloud_launch direct failed " + t);
+            }
+            try {
+                int flags = android.app.PendingIntent.FLAG_CANCEL_CURRENT;
+                if (android.os.Build.VERSION.SDK_INT >= 23) flags |= android.app.PendingIntent.FLAG_IMMUTABLE;
+                android.app.PendingIntent pi = android.app.PendingIntent.getActivity(this, 0x4D43, i, flags);
+                android.app.AlarmManager am =
+                        (android.app.AlarmManager) getSystemService(android.content.Context.ALARM_SERVICE);
+                if (am != null) {
+                    long at = System.currentTimeMillis() + 2500L;
+                    try {
+                        if (android.os.Build.VERSION.SDK_INT >= 23) {
+                            am.setExactAndAllowWhileIdle(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                        } else {
+                            am.set(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                        }
+                    } catch (Throwable tt) {
+                        am.set(android.app.AlarmManager.RTC_WAKEUP, at, pi);
+                    }
+                    io.github.ldxm666.mapadkiller.SafeLog.i(io.github.ldxm666.mapadkiller.MainHook.TAG, "event=cloud_launch alarm_at=+2500ms");
+                }
+            } catch (Throwable t) {
+                io.github.ldxm666.mapadkiller.SafeLog.w(io.github.ldxm666.mapadkiller.MainHook.TAG, "event=cloud_launch alarm failed " + t);
+            }
+        } catch (Throwable t) {
+            toast("打开高德失败：" + t.getMessage());
+        }
+    }
+
+    private void startCloudCapture() {
+        try {
+            final boolean isEmbedded = embedded();
+            final boolean done = cloudDone;
+            String message;
+            if (done) {
+                message = "已经抓过本版本的官方云端数据"
+                        + (cloudFileCount > 0 ? "（" + cloudFileCount + " 个配置文件）" : "")
+                        + "。\n\n"
+                        + (isEmbedded
+                        ? "重新抓取会先关闭模块并重启高德：正常用一遍（首页 / 搜索 / 我的），抓完再重启一次恢复你的设置。"
+                        : "点「重新抓取」会自动打开高德：先以纯官方模式重跑一遍抓数据，抓完自动再重启一次恢复模块功能。");
+            } else {
+                message = "高德的首页卡片、金刚位、工具宫格、云控开关都是服务端下发的。"
+                        + "首次必须先让高德跑一遍纯官方，把这份云端数据抓下来，之后才按你的设置改；"
+                        + "否则会出现图标不显示、宫格缺格。\n\n"
+                        + (isEmbedded
+                        ? "点「开始抓取」后高德会重启一次，期间模块功能全部关闭（悬浮窗保留）。"
+                        : "点「开始抓取」会自动打开高德并以纯官方模式跑一遍（期间模块功能关闭），抓完自动重启恢复；若高德没有自动回来，手动打开一次即可。\n\n"
+                        + "抓取时请不要退出高德，停留 20 秒左右。");
+            }
+            glassDialog(done ? "重新抓取云数据？" : "抓取云数据", message,
+                    done ? "重新抓取" : "开始抓取",
+                    new Runnable() {
+                        @Override public void run() { doStartCloudCapture(isEmbedded); }
+                    },
+                    null, null, "取消", null);
+        } catch (Throwable t) {
+            toast("操作失败：" + t.getMessage());
+        }
+    }
+
+    private void doStartCloudCapture(boolean isEmbedded) {
+        try {
+            if (isEmbedded) {
+                if (!CaptureGate.setCaptureMode(this, true)) {
+                    toast("写入采集标记失败，请检查存储权限");
+                    return;
+                }
+                toast("正在重启高德，请稍候…");
+                CaptureGate.restartHost(this);
+                return;
+            }
+            toast("正在请求抓取云数据…");
+            new Thread(new Runnable() {
+                @Override public void run() {
+                    boolean result = false;
+                    String error = null;
+                    try {
+                        result = io.github.ldxm666.mapadkiller.Baseline.requestRecapture();
+                    } catch (Throwable t) {
+                        error = String.valueOf(t.getMessage());
+                    }
+                    final boolean ok = result;
+                    final String err = error;
+                    if (err != null) {
+                        runOnUiThread(new Runnable() {
+                            @Override public void run() { toast("请求失败：" + err); }
+                        });
+                        return;
+                    }
+                    runOnUiThread(new Runnable() {
+                        @Override public void run() {
+                            if (ok) {
+                                // 本地先记成「已请求」，宿主真正抓完会用广播把这一行改成「已抓取 N 项」。
+                                markCapturePending();
+                                cloudPending = true;
+                                cloudError = null;
+                                cloudStateKnown = true;
+                                refreshDiagRows();
+                                toast("已请求抓取 · 正在打开高德，若弹出“允许启动”请点允许");
+                                launchHost();
+                            } else {
+                                String why = io.github.ldxm666.mapadkiller.Baseline.lastRequestError();
+                                toast("请求失败：" + (why == null ? "框架服务未连接" : why));
+                            }
+                        }
+                    });
+                }
+            }, "mapclean-cloud-request").start();
+        } catch (Throwable t) {
+            toast("操作失败：" + t.getMessage());
+        }
+    }
+
+    /** 运行日志入口：内置版直接读环形缓冲；模块版事件在宿主进程，走 root 从 logcat 捞一份。 */
+    private void showLogDialog() {
+        int count = 0;
+        String body = "";
+        try {
+            count = CaptureLog.recentCount();
+            body = CaptureLog.recentText(400);
+        } catch (Throwable ignored) { }
+        if (body == null) body = "";
+        if (body.length() > 0 || embedded()) {
+            showLogSheet(body, count);
+            return;
+        }
+        toast("正在读取宿主日志…");
+        new Thread(new Runnable() {
+            @Override public void run() {
+                String text = "";
+                try {
+                    Process pr = Runtime.getRuntime().exec(new String[]{"su", "-c",
+                            "logcat -d -t 400 -s MapAdKiller:V MapCleanCfg:V MapCleanFloat:V MapCleanCapture:V"});
+                    java.io.BufferedReader r = new java.io.BufferedReader(
+                            new java.io.InputStreamReader(pr.getInputStream()));
+                    StringBuilder b = new StringBuilder(32 * 1024);
+                    String line;
+                    while ((line = r.readLine()) != null) b.append(line).append('\n');
+                    pr.waitFor();
+                    text = b.toString();
+                } catch (Throwable ignored) { }
+                final String result = text;
+                runOnUiThread(new Runnable() {
+                    @Override public void run() { showLogSheet(result, 0); }
+                });
+            }
+        }, "mapclean-host-log").start();
+    }
+
+    /** 日志弹层：等宽只读文本 + 复制 / 导出 txt。 */
+    private void showLogSheet(String body, int count) {
+        try {
+            if (body == null) body = "";
+            final String shown = body;
+            if (body.length() == 0) {
+                body = embedded()
+                        ? "还没有日志事件。\n\n模块加载、hook 安装、巡航判定、抓取流程都会实时写进这里。"
+                        : "还没有日志事件。\n\n没能读到宿主日志（需要 root）。\n点下方「导出 txt」可让宿主侧导出一份最近 10 分钟的运行日志。";
+            }
+
+            final AlertDialog dlg = new AlertDialog.Builder(this).create();
+
+            LinearLayout box = new LinearLayout(this);
+            box.setOrientation(LinearLayout.VERTICAL);
+            box.setBackground(skin.glassFor(box, GLASS_R));
+            box.setPadding(dp(18), dp(16), dp(18), dp(8));
+
+            box.addView(text("运行日志", 17, Typeface.BOLD, cTxP()));
+            TextView sub = text((count > 0 ? "最近 " + count + " 条事件" : "暂无事件")
+                    + " · 环形缓冲保留 10 分钟", 11.5f, Typeface.NORMAL, cTxS());
+            LinearLayout.LayoutParams subLp = skin.matchWrap();
+            subLp.topMargin = dp(3);
+            box.addView(sub, subLp);
+
+            TextView tv = new TextView(this);
+            tv.setText(body);
+            tv.setTextSize(10.5f);
+            tv.setTypeface(Typeface.MONOSPACE);
+            tv.setTextColor(cTxS());
+            tv.setTextIsSelectable(true);
+            tv.setLineSpacing(0, 1.15f);
+            tv.setPadding(dp(10), dp(10), dp(10), dp(10));
+            tv.setBackground(tintBg(dark ? 0x1FFFFFFF : 0x0A000000));
+
+            ScrollView sc = new ScrollView(this);
+            sc.setVerticalScrollBarEnabled(true);
+            sc.addView(tv, new ScrollView.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+            LinearLayout.LayoutParams scLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    Math.min(dp(420), (int) (getResources().getDisplayMetrics().heightPixels * 0.52f)));
+            scLp.topMargin = dp(12);
+            box.addView(sc, scLp);
+
+            LinearLayout btns = new LinearLayout(this);
+            btns.setOrientation(LinearLayout.HORIZONTAL);
+            btns.setGravity(Gravity.RIGHT);
+            LinearLayout.LayoutParams btnLp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            btnLp.topMargin = dp(10);
+            box.addView(btns, btnLp);
+
+            btns.addView(sheetButton("复制", dlg, new Runnable() {
+                @Override public void run() {
+                    try {
+                        android.content.ClipboardManager cm = (android.content.ClipboardManager)
+                                getSystemService(CLIPBOARD_SERVICE);
+                        String text = shown.length() > 0 ? shown : CaptureLog.recentText(400);
+                        cm.setPrimaryClip(android.content.ClipData.newPlainText("MapCleanLog", text));
+                        toast("已复制到剪贴板");
+                    } catch (Throwable t) {
+                        toast("复制失败：" + t.getMessage());
+                    }
+                }
+            }), btnMargin());
+
+            btns.addView(sheetButton("导出 txt", dlg, new Runnable() {
+                @Override public void run() {
+                    String path = null;
+                    try { path = CaptureLog.dumpRecent(MainActivity.this); } catch (Throwable ignored) { }
+                    toast(path == null ? "导出失败：请稍后重试" : "已导出：" + path);
+                }
+            }), btnMargin());
+
+            btns.addView(sheetButton("关闭", dlg, null), btnMargin());
+
+            dlg.setView(box);
+            dlg.show();
+            Window w = dlg.getWindow();
+            if (w != null) {
+                w.setBackgroundDrawable(new ColorDrawable(0x00000000));
+                android.view.WindowManager.LayoutParams lp = w.getAttributes();
+                lp.dimAmount = 0.45f;
+                lp.width = Math.min(getResources().getDisplayMetrics().widthPixels - dp(40), dp(460));
+                w.setAttributes(lp);
+            }
+        } catch (Throwable t) {
+            toast("打开日志失败：" + t.getMessage());
+        }
+    }
+
+    private LinearLayout.LayoutParams btnMargin() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.leftMargin = dp(8);
+        return lp;
+    }
+
+    private TextView sheetButton(String label, final AlertDialog dlg, final Runnable action) {
+        TextView b = text(label, 14, Typeface.BOLD, cAccent());
+        b.setPadding(dp(14), dp(10), dp(14), dp(10));
+        b.setBackground(ripple(dark ? tintBg(0x2E7AB1FF) : tintBg(0x1E0A6CF5), HEAD_R));
+        b.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                if (action != null) action.run();
+                if (dlg != null) dlg.dismiss();
+            }
+        });
+        return b;
     }
 
     /** 三格指标（版本 / 作用域 / 广告 SDK）：继续复用 refreshMetrics() 的刷新契约。 */
