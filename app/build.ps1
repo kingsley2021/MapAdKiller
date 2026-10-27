@@ -95,6 +95,21 @@ Copy-Item "$src\build\dex\classes.dex" "$src\build\out\classes.dex"
 # Complete official service/interface 102 classes are merged in step 3.
 # Framework API definitions are compile-only and never included in the APK.
 Copy-Item "$src\META-INF" "$src\build\out\META-INF" -Recurse -Force
+    # module.prop 的 version / versionCode 必须跟 Version.java 同步。
+    # 这里曾经是手写的：2.2.5 / 2.2.6 两个包里的 module.prop 一直停在旧值，
+    # 结果 LSPosed 模块仓库页面显示的版本号长期落后（模块能装、版本号不对）。
+    # 现在每次构建都从 Version.java 重写，单一口径。
+    if ($verText -notmatch 'CODE\s*=\s*(\d+)') { throw "cannot parse Version.CODE from Version.java" }
+    $VerCode = $Matches[1]
+    $propPath = "$src\build\out\META-INF\xposed\module.prop"
+    if (-not (Test-Path $propPath)) { throw "module.prop missing at $propPath" }
+    $prop = [System.IO.File]::ReadAllLines($propPath)
+    for ($i = 0; $i -lt $prop.Count; $i++) {
+        if ($prop[$i] -match '^version=') { $prop[$i] = "version=$VerName" }
+        elseif ($prop[$i] -match '^versionCode=') { $prop[$i] = "versionCode=$VerCode" }
+    }
+    [System.IO.File]::WriteAllLines($propPath, $prop, (New-Object System.Text.UTF8Encoding($false)))
+    Write-Host "module.prop -> version=$VerName versionCode=$VerCode"
 New-Item -ItemType Directory -Force -Path "$src\build\out\lib" | Out-Null
 Get-ChildItem "$src\libs" -Directory | Where-Object { $_.Name -in @('arm64-v8a','armeabi-v7a','x86','x86_64') } | ForEach-Object {
     Copy-Item $_.FullName "$src\build\out\lib" -Recurse -Force
