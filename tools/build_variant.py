@@ -234,12 +234,19 @@ TARGETS = {
         "artifact": "百度地图-{version}-免root内置版.apk",
         "slimModule": "MapAdKiller-baidu-slim-{version}.apk",
         "dropPackages": ("io.github.ldxm666.mapadkiller",),
+        # 这两个类与厂商无关（只依赖 android.* 与 libxposed API），但它们是**日志抓取**的全部实现：
+        # H 是日志漏斗，CaptureLog 把每条日志抄进环形缓冲、在面板里落盘。整包丢掉会让百度内置版的
+        # 面板里「日志抓取」按钮点了没反应（用户反馈问题拿不到日志），所以按文件保留，不用空实现顶掉。
+        "keepFiles": (
+            "io/github/ldxm666/mapadkiller/H.java",
+            "io/github/ldxm666/mapadkiller/CaptureLog.java",
+        ),
         "stubs": SHARED_STUBS + (
             "io/github/ldxm666/mapadkiller/Config.java",
             "io/github/ldxm666/mapadkiller/App.java",
             "io/github/ldxm666/mapadkiller/MainHook.java",
                 "io/github/ldxm666/mapadkiller/Baseline.java",
-                "io/github/ldxm666/mapadkiller/CaptureLog.java",
+                "io/github/ldxm666/mapadkiller/AmapCruise.java",
             "io/github/ldxm666/mapclean/AmapPanel.java",
             "io/github/ldxm666/mapclean/TmapPanel.java",
         ),
@@ -258,7 +265,10 @@ TARGETS = {
             b"Lio/github/ldxm666/mapclean/TmapPanel;",       # the generated no-op
             b"Lio/github/ldxm666/mapadkiller/MainHook;",     # the forwarding target
         ),
-        "banned": vendor_classes("io.github.ldxm666.mapadkiller", STUBBED_CLASSES) + (
+        "banned": vendor_classes(
+            "io.github.ldxm666.mapadkiller",
+            STUBBED_CLASSES + ("H", "AmapCruise"),   # CaptureLog 已在 STUBBED_CLASSES；H/AmapCruise 由 keepFiles 或空实现提供
+        ) + (
             b"Lcom/autonavi/",
         ),
     },
@@ -337,12 +347,23 @@ def copy_slim_sources(dest: Path, target: dict) -> dict:
     removed, stubbed = [], []
 
     # 1) drop whole foreign packages
+    keep = {Path(x).as_posix() for x in target.get("keepFiles", ())}
     for pkg in target["dropPackages"]:
         folder = src / Path(pkg.replace(".", "/"))
         if folder.is_dir():
+            held = {}
             for f in folder.rglob("*.java"):
-                removed.append(f.relative_to(src).as_posix())
+                rel = f.relative_to(src).as_posix()
+                if rel in keep:
+                    held[rel] = f.read_bytes()
+                else:
+                    removed.append(rel)
             shutil.rmtree(folder)
+            # 整包删掉后再把保留的类放回去（路径按 src 相对，父目录可能已被删）
+            for rel, data in held.items():
+                back = src / rel
+                back.parent.mkdir(parents=True, exist_ok=True)
+                back.write_bytes(data)
 
     # 2) drop named files in the two kept packages
     for rel in sorted(DROP_AMAP_FILES):

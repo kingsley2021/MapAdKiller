@@ -13,4 +13,12 @@ public final class Config {
     public static final int BACKEND_NONE = 0;
     public static final int BACKEND_LOCAL = 1;
     public static final int BACKEND_REMOTE = 2;
+
+    /** 与真实 Config 同名同值：CaptureLog 的配置快照按这个前缀过滤工具槽位键。 */
+    public static final String K_TOOL_PREFIX = "tool_";
+
+    /** 内置版没有可读的配置后端，快照恒为空 —— CaptureLog 只会把它写进日志文本。 */
+    public static java.util.Map<String, Object> snapshot() {
+        return java.util.Collections.emptyMap();
+    }
 }
